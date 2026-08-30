@@ -1,0 +1,10 @@
+# Your verdicts and comments. Local to whoever is reviewing.
+marks.json
+marks.tmp
+# Recently used locations, and the interpreter found for rendering.
+recent.json
+recent.tmp
+.renderer
+__pycache__/
+*.pyc
+.DS_Store
