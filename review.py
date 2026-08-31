@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import http.server
+import io
 import json
 import mimetypes
 import re
@@ -136,6 +137,124 @@ def _migrate(marks: dict) -> dict:
     return out
 
 
+# --- rendering a document the browser would otherwise DOWNLOAD ---------------
+# A browser saves ``text/csv`` and every spreadsheet type instead of showing
+# them, so an iframe pointed at one pops a download dialog and leaves the pane
+# blank -- on every refresh, twice, once per side. Rendering them here also
+# means they are ordinary DOM, so the two panes scroll together like PDFs do.
+_MAX_ROWS = 3000
+_TABLE_EXTS = {".csv", ".tsv"}
+_SHEET_EXTS = {".xlsx", ".xlsm"}
+_TEXT_EXTS = {".txt", ".md", ".json", ".jsonl", ".xml", ".html", ".htm",
+              ".eml", ".log", ".yaml", ".yml", ".ini", ".cfg"}
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
+
+
+def _table_html(rows) -> str:
+    import html as _html
+    out = ["<table><thead><tr><th></th>"]
+    head = rows[0] if rows else []
+    out += [f"<th>{_html.escape(str(c))}</th>" for c in head]
+    out.append("</tr></thead><tbody>")
+    for n, row in enumerate(rows[1:_MAX_ROWS], 1):
+        out.append(f"<tr><td class=n>{n}</td>")
+        out += [f"<td>{_html.escape(str(c))}</td>" for c in row]
+        out.append("</tr>")
+    out.append("</tbody></table>")
+    if len(rows) - 1 > _MAX_ROWS:
+        out.append(f"<p class=more>{len(rows) - 1 - _MAX_ROWS} more rows not shown</p>")
+    return "".join(out)
+
+
+def _rows_from_csv(data: bytes):
+    import csv, io as _io
+    text = data.decode("utf8", errors="replace")
+    sample = text[:4096]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
+    except Exception:  # noqa: BLE001
+        dialect = csv.excel
+    return list(csv.reader(_io.StringIO(text), dialect))
+
+
+def _col_index(ref: str) -> int:
+    """``C7`` -> 2. Sheet XML omits empty cells, so a row has to be placed by
+    its column letters or every value after a gap shifts left."""
+    n = 0
+    for ch in ref:
+        if not ch.isalpha():
+            break
+        n = n * 26 + (ord(ch.upper()) - 64)
+    return max(0, n - 1)
+
+
+def _rows_from_xlsx(data: bytes):
+    """First sheet of an xlsx, using only the standard library.
+
+    This tool has no third-party dependencies on purpose -- it is a stdlib
+    http.server and shells out to a separate interpreter for PDF rendering --
+    and an xlsx is a zip of XML, so reading one needs no exception to that.
+    Without this the 138 spreadsheets in a finance batch fell through to the
+    raw byte route, and the browser SAVED each one instead of showing it.
+    """
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        shared: list[str] = []
+        if "xl/sharedStrings.xml" in z.namelist():
+            root = ET.fromstring(z.read("xl/sharedStrings.xml"))
+            shared = ["".join(t.text or "" for t in si.iter(f"{NS}t"))
+                      for si in root.findall(f"{NS}si")]
+        sheets = sorted(n for n in z.namelist()
+                        if n.startswith("xl/worksheets/sheet") and n.endswith(".xml"))
+        if not sheets:
+            return []
+        rows: list[list[str]] = []
+        for row in ET.fromstring(z.read(sheets[0])).iter(f"{NS}row"):
+            cells: list[str] = []
+            for c in row.findall(f"{NS}c"):
+                at = _col_index(c.get("r", ""))
+                while len(cells) < at:
+                    cells.append("")
+                v = c.find(f"{NS}v")
+                if c.get("t") == "s" and v is not None and v.text is not None:
+                    cells.append(shared[int(v.text)] if int(v.text) < len(shared) else "")
+                elif c.get("t") == "inlineStr":
+                    cells.append("".join(t.text or "" for t in c.iter(f"{NS}t")))
+                else:
+                    cells.append(v.text if v is not None and v.text else "")
+            rows.append(cells)
+            if len(rows) > _MAX_ROWS:
+                break
+        width = max((len(r) for r in rows), default=0)
+        for r in rows:
+            r.extend([""] * (width - len(r)))
+        return rows
+
+
+def view(key: str, data: bytes) -> dict:
+    """How this document should be shown, and the payload to show it with."""
+    ext = Path(key).suffix.lower()
+    if ext == ".pdf":
+        return {"kind": "pdf"}
+    try:
+        if ext in _TABLE_EXTS:
+            return {"kind": "table", "html": _table_html(_rows_from_csv(data))}
+        if ext in _SHEET_EXTS:
+            return {"kind": "table", "html": _table_html(_rows_from_xlsx(data))}
+        if ext in _TEXT_EXTS:
+            import html as _html
+            return {"kind": "text",
+                    "html": f"<pre>{_html.escape(data.decode('utf8', 'replace'))}</pre>"}
+        if ext in _IMAGE_EXTS:
+            return {"kind": "image"}
+    except Exception as exc:  # noqa: BLE001 -- fall back to the raw byte route
+        return {"kind": "other", "why": f"{type(exc).__name__}: {exc}"[:200]}
+    return {"kind": "other"}
+
+
 def session_id(left: str, right: str) -> str:
     """Stable id for a (left, right) pair, so verdicts survive a re-open."""
     h = hashlib.sha256(f"{left}\x00{right}".encode()).hexdigest()[:12]
@@ -144,6 +263,19 @@ def session_id(left: str, right: str) -> str:
 
 PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Review</title><style>
+.doc{background:#fff;padding:10px 12px}
+.doc table{border-collapse:collapse;font-size:12.5px;width:100%}
+.doc th,.doc td{border:1px solid #e3e6ea;padding:3px 6px;text-align:left;
+  vertical-align:top;white-space:pre-wrap;word-break:break-word}
+.doc thead th{position:sticky;top:0;background:#f5f6f8;font-weight:600;z-index:1}
+.doc td.n{color:#999;text-align:right;font-variant-numeric:tabular-nums;
+  background:#fafbfc;width:1%;white-space:nowrap}
+.doc pre{margin:0;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+  white-space:pre-wrap;word-break:break-word}
+.doc .more{color:#888;font-size:12px;padding:6px 2px}
+.opt{color:var(--mut);font-weight:400;font-size:11px}
+.loc{font-weight:600;font-size:13px;padding:2px 8px;border-radius:5px;background:#eef1f5;
+     color:#333;white-space:nowrap;max-width:22ch;overflow:hidden;text-overflow:ellipsis}
 :root{--fg:#1a1d21;--mut:#6b7076;--line:#e4e7ea;--soft:#f7f8f9;--ok:#0b6b5e;--warn:#a15c00;--bad:#b3261e;--sel:#eef4f3}
 html{color-scheme:light}*{box-sizing:border-box}
 body{margin:0;height:100vh;display:flex;flex-direction:column;background:#fff;color:var(--fg);
@@ -265,6 +397,9 @@ kbd{font:11px ui-monospace,Menlo,monospace;background:var(--soft);border:1px sol
 <div id="veil" class="on"><div class="pop">
   <h1>Compare a run</h1>
   <p class="sub">Point at the folder, zip or bucket holding it. Both halves are found inside.</p>
+  <div class="row"><label for="label">Name <span class="opt">optional</span></label>
+    <div class="grow"><input type="text" id="label" spellcheck="false"
+      placeholder="finance 28th — defaults to the folder name"></div></div>
   <div class="row"><label for="root">Location</label>
     <div class="grow"><input type="text" id="root" spellcheck="false" placeholder="s3://bucket/export   or a folder">
       <button class="mini" id="browse">Choose…</button></div>
@@ -288,6 +423,7 @@ kbd{font:11px ui-monospace,Menlo,monospace;background:var(--soft);border:1px sol
 <div id="banner"><span id="btext"></span><button id="bfix"></button><span class="x" id="bx">&times;</span></div>
 <header>
   <button class="icobtn" id="showside" title="show the list  (s)" style="display:none">&#187;</button>
+  <span class="loc" id="loc" title=""></span>
   <span class="pos" id="pos">–</span>
   <span class="name" id="name"></span>
   <span class="tag" id="how"></span>
@@ -381,8 +517,9 @@ async function inspect(){
 el("root").addEventListener("keydown",e=>{if(e.key==="Enter"){inspected?open_():inspect();}});
 async function open_(){
   el("go").disabled=true;note("Reading both sides…");
-  const body=twoWay?{left:el("left").value,right:el("right").value,profile:el("profile").value}
-                   :{root:el("root").value,profile:el("profile").value,source:el("src").value,output:el("out").value};
+  const lbl=el("label")?el("label").value.trim():"";
+  const body=twoWay?{left:el("left").value,right:el("right").value,profile:el("profile").value,label:lbl}
+                   :{root:el("root").value,profile:el("profile").value,source:el("src").value,output:el("out").value,label:lbl};
   let r; try{r=await(await fetch("/api/open",{method:"POST",body:JSON.stringify(body)})).json();}
   catch(e){note("could not reach the server: "+e,"err");el("go").disabled=false;return;}
   el("go").disabled=false;
@@ -398,6 +535,11 @@ function start(r){
   el("lh").textContent="Source · "+(r.left_short||"source"); el("lh").title=r.left||"";
   el("rh").textContent="Output · "+(r.right_short||"output"); el("rh").title=r.right||"";
   el("split").textContent=(r.source||"everything else")+" → "+(r.output||"?");
+  // Two tabs on two batches look identical without this.
+  const where=(r.label||"").trim()
+    || (r.root||"").replace(/\/+$/,"").split("/").pop() || r.root || "review";
+  el("loc").textContent=where; el("loc").title=r.root||"";
+  document.title=where+" · "+(r.pairs?r.pairs.length:0)+" docs";
   if(r.hint){el("btext").textContent=r.hint.text;el("bfix").textContent="use "+r.hint.output+"/";
     el("bfix").onclick=()=>{el("out").value=r.hint.output;el("banner").classList.remove("on");open_();};
     el("banner").classList.add("on");}
@@ -492,6 +634,20 @@ function iframeFor(side,id){const f=document.createElement("iframe");
  f.src="/doc/"+side+"/"+id+(PAGE>1?"#page="+PAGE:""); return f;}
 function build_pane(box,side,id,meta){
   box.innerHTML="";
+  // Rendered here rather than handed to the browser: it SAVES a csv/xlsx
+  // instead of showing one. Rendering also makes them ordinary DOM, so these
+  // panes scroll in step exactly like the PDF ones.
+  if(meta.kind==="table"||meta.kind==="text"){
+    const sc=document.createElement("div");
+    sc.className="scroll doc "+meta.kind;
+    sc.innerHTML=meta.html||"";
+    box.appendChild(sc); return sc;
+  }
+  if(meta.kind==="image"){
+    const sc=document.createElement("div"); sc.className="scroll";
+    const img=new Image(); img.src="/doc/"+side+"/"+id; img.style.width="100%";
+    sc.appendChild(img); box.appendChild(sc); return sc;
+  }
   if(meta.kind!=="pdf"){box.appendChild(iframeFor(side,id));return null;}
   const sc=document.createElement("div"); sc.className="scroll";
   const W=Math.max(280,(box.clientWidth||600)-24);
@@ -798,7 +954,7 @@ def inspect_root(root: str, profile: str | None) -> dict:
 
 
 def open_review(root=None, left=None, right=None, profile=None,
-                source=None, output=None, ignore=None) -> dict:
+                source=None, output=None, ignore=None, label=None) -> dict:
     ls, rs, filt = _sides(root, left, right, profile, source, output)
     ign = {s.strip().lower() for s in (ignore or pairing.DEFAULT_IGNORE) if s.strip()}
     ign |= {s.lower() for s in (source, output) if s}
@@ -872,7 +1028,11 @@ def open_review(root=None, left=None, right=None, profile=None,
     session = {"pairs": rows, "marks": marks, "counts": counts,
                "left": S["left"], "right": S["right"], "hint": hint,
                "left_short": short(ls, source), "right_short": short(rs, output),
-               "source": source, "output": output, "root": root}
+               "source": source, "output": output, "root": root,
+               # What the browser tab is named. Two tabs on two batches are
+               # otherwise identical, which is how a reviewer ends up reading
+               # the wrong day's output.
+               "label": (label or "").strip()}
     with _LOCK:
         S["session"] = session
     return session
@@ -948,11 +1108,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 key = row["left"] if side == "left" else row["right"]
                 if key is None:
                     return self._json({"kind": "none"})
-                if not key.lower().endswith(".pdf") or not RENDER.available:
-                    return self._json({"kind": "other"})
                 store = S["left_store"] if side == "left" else S["right_store"]
-                sizes = RENDER.pages(f"{side}:{sid}", store.cached_read(key))
-                return self._json({"kind": "pdf", "pages": sizes})
+                data = store.cached_read(key)
+                shape = view(key, data)
+                if shape["kind"] == "pdf":
+                    if not RENDER.available:
+                        return self._json({"kind": "other"})
+                    return self._json({"kind": "pdf",
+                                       "pages": RENDER.pages(f"{side}:{sid}", data)})
+                return self._json(shape)
             except Exception as exc:  # noqa: BLE001 -- fall back to the plugin
                 return self._json({"kind": "other", "why": str(exc)[:200]})
         if path.startswith("/page/"):
@@ -987,6 +1151,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._send(str(exc).encode()[:400], "text/plain", 404)
             name = Path(key).name
             ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+            # Anything textual is served as text/plain. A browser SAVES
+            # text/csv, which is the download dialog this route used to pop.
+            if ctype.startswith("text/") and not ctype.startswith("text/html"):
+                ctype = "text/plain; charset=utf-8"
             # HTTP headers are latin-1. A macOS screenshot is named with a
             # narrow no-break space (U+202F) and crashed send_header mid
             # response, so the browser got an empty reply and the pane went
@@ -1022,6 +1190,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     profile=(body.get("profile") or "").strip() or None,
                     source=(body.get("source") or "").strip() or None,
                     output=(body.get("output") or "").strip() or None,
+                    label=(body.get("label") or "").strip() or None,
                 ))
             except Exception as exc:  # noqa: BLE001 -- surfaced in the popup
                 return self._json({"error": f"{type(exc).__name__}: {exc}"})
@@ -1055,6 +1224,7 @@ def main():
     ap.add_argument("--source", help="folder name of the source half inside root")
     ap.add_argument("--output", help="folder name of the output half inside root")
     ap.add_argument("--profile", help="AWS profile for s3:// locations")
+    ap.add_argument("--label", help="what to call this batch in the tab title")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-open", action="store_true")
     a = ap.parse_args()
@@ -1072,6 +1242,7 @@ def main():
             print(f"  note: {guess['warn']}", flush=True)
     if a.root or (a.left and a.right):
         open_review(root=a.root, left=a.left, right=a.right, profile=a.profile,
+                    label=a.label,
                     source=a.source, output=a.output)
 
     url = f"http://127.0.0.1:{a.port}/"
