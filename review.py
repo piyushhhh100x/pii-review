@@ -669,7 +669,17 @@ function save(p,r){
 
 /* ---------- popup ---------- */
 function note(h,c){el("msg").innerHTML=h?`<p class="note ${c||""}">${h}</p>`:"";}
-function syncProf(){el("profrow").style.display=(el("root").value+el("left").value+el("right").value).includes("s3://")?"":"none";}
+// The profile box appears for anything that names S3, not just a typed
+// "s3://". Keyed on that literal alone, a pasted console URL or an ARN left
+// the field hidden -- so the one credential the request needed could not be
+// entered, and Open came back with an unhelpful access error.
+// Note the two different hosts: the REST endpoints are *.amazonaws.com, but
+// the console is console.aws.amazon.com -- which does not contain the string
+// "amazonaws.com" at all. Matching only the first spelling left the field
+// hidden for exactly the URL people actually paste.
+const NAMES_S3=/s3:\/\/|amazonaws\.com|aws\.amazon\.com\/s3|arn:aws[a-z-]*:s3:/i;
+function syncProf(){el("profrow").style.display=
+  NAMES_S3.test(el("root").value+" "+el("left").value+" "+el("right").value)?"":"none";}
 ["root","left","right"].forEach(id=>el(id).addEventListener("input",()=>{syncProf();
  if(id==="root"){el("splitrow").style.display="none";inspected=null;note("");}}));
 async function choose(t){note("Opening the picker…");
@@ -693,7 +703,13 @@ async function inspect(){
       if(o.name===val)op.selected=true;sel.appendChild(op);});};
   fill(el("src"),r.source||"",true); fill(el("out"),r.output||"",false);
   el("splitrow").style.display="grid";
-  note(r.warn||"Found both halves. Change either if this is not right.",r.warn?"warn":"");
+  // Show what was actually opened. A pasted console URL becomes the s3:// URI
+  // here, which is both the confirmation that the paste was understood and
+  // the string the recents list and marks.json will be keyed by.
+  let msg=r.warn||"Found both halves. Change either if this is not right.";
+  if(r.root&&r.root!==root){ el("root").value=r.root;
+    msg=r.warn||("Opening "+r.root+" — change either half if this is not right."); }
+  note(msg,r.warn?"warn":"");
 }
 el("root").addEventListener("keydown",e=>{if(e.key==="Enter"){inspected?open_():inspect();}});
 async function open_(){
@@ -1112,7 +1128,9 @@ fetch("/api/boot").then(r=>r.json()).then(b=>{
 def _sides(root, left, right, profile, source, output):
     """Resolve the request into (left_store, right_store, filters)."""
     if root:
-        st = stores.open_store(root, profile)
+        # A location pasted from the console usually points at the output
+        # half. Both halves are one level up.
+        st = stores.open_store(resolve_root(root), profile)
         # One location: both halves live inside it, told apart by folder name.
         # An empty source means "everything that is not the output", which is
         # the shape of an in-place run (the tree is the source, _pii/output is
@@ -1139,8 +1157,21 @@ def _sides(root, left, right, profile, source, output):
     return ls, rs, {}
 
 
+def resolve_root(spec: str) -> str:
+    """Canonical location for a single-location request.
+
+    Order matters and cost a debugging round: a console URL carries the run's
+    depth in ``?prefix=``, not in its path, so climbing out of the output half
+    has to happen AFTER the URL is turned into an s3:// URI. Climbing first
+    silently did nothing, and the review opened on the output half alone.
+    """
+    s3 = stores.parse_s3(spec)
+    return pairing.run_root(s3[0] if s3 else (spec or "").strip())
+
+
 def inspect_root(root: str, profile: str | None) -> dict:
     """What the two halves inside one location look like."""
+    root = resolve_root(root)
     st = stores.open_store(root, profile)
     # Deliberately the RAW listing, not ``docs``: an in-place run puts its
     # output under ``_pii/output``, which the document filter drops. It has to
@@ -1148,7 +1179,12 @@ def inspect_root(root: str, profile: str | None) -> dict:
     paths = [p for p in st._list() if "__MACOSX" not in p]
     if not paths:
         return {"error": f"nothing found in {root}"}
-    return pairing.autosplit(paths)
+    out = pairing.autosplit(paths)
+    # Hand back what was actually opened. The popup writes this into the
+    # location box, so a pasted console URL visibly becomes the s3:// URI the
+    # recents list and marks.json will be keyed by -- one run, one entry.
+    out["root"] = st.spec
+    return out
 
 
 def open_review(root=None, left=None, right=None, profile=None,
@@ -1188,7 +1224,10 @@ def open_review(root=None, left=None, right=None, profile=None,
                  right=f"{rs}{'/' + output if output else ''}")
 
     if root or left:
-        spec = root or left
+        # ``ls.spec`` not ``root``: the store holds the canonical s3:// form,
+        # so a console URL and the URI for the same run make one recents entry
+        # instead of two.
+        spec = ls.spec if root else left
         recent = _read_json(RECENT, [])
         recent = [spec] + [x for x in recent if x != spec]
         _write_json(RECENT, recent[:10])

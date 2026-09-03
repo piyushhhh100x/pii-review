@@ -248,6 +248,37 @@ OUTPUT_MARKERS = ["redacted", "output", "outputs", "out", "processed",
 OUTPUT_MARKERS = OUTPUT_MARKERS + ["_pii", "pii"]
 
 
+#: What the pipeline appends to a run root when it writes in place, matching
+#: ``pii_pipeline.output_prefix`` in the exporter config. Longest first, so
+#: ``_pii/output`` is stripped whole rather than one segment at a time.
+OUTPUT_PREFIXES = ("_pii/output", "_pii")
+
+
+def run_root(spec: str) -> str:
+    """The run root behind a location that points INTO the output half.
+
+    A reviewer copies a location out of the console while looking at the
+    result, so what lands in the box is ``.../_pii/output`` -- the half that
+    has no source to compare against. Opened literally that yields a review
+    with an empty left pane for every row, which reads as "the pipeline
+    dropped everything" rather than "you pointed one level too deep".
+
+    Only the pipeline's own suffix is stripped, and only from the end. A run
+    that genuinely lives in a folder called ``output`` is untouched, because
+    the exporter writes ``_pii/output`` and nothing else.
+    """
+    spec = (spec or "").rstrip("/")
+    for suffix in OUTPUT_PREFIXES:
+        tail = "/" + suffix
+        if spec.lower().endswith(tail.lower()):
+            trimmed = spec[: -len(tail)]
+            # Never strip back to a bare scheme or an empty path: "s3://b/_pii"
+            # has a root, "s3://_pii" does not.
+            if trimmed and not trimmed.endswith((":/", "s3:/", "/")):
+                return trimmed
+    return spec
+
+
 def layout_names(paths: list[str], max_siblings: int = 8):
     """Segment names that describe the tree's LAYOUT, with their file counts.
 
