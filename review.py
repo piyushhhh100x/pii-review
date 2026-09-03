@@ -145,14 +145,17 @@ def _migrate(marks: dict) -> dict:
 _MAX_ROWS = 3000
 _TABLE_EXTS = {".csv", ".tsv"}
 _SHEET_EXTS = {".xlsx", ".xlsm"}
+_WORD_EXTS = {".docx", ".docm"}
+_SLIDE_EXTS = {".pptx", ".pptm"}
 _TEXT_EXTS = {".txt", ".md", ".json", ".jsonl", ".xml", ".html", ".htm",
-              ".eml", ".log", ".yaml", ".yml", ".ini", ".cfg"}
+              ".eml", ".log", ".yaml", ".yml", ".ini", ".cfg",
+              ".sql", ".vcf", ".ics", ".env"}
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 
 
 def _table_html(rows) -> str:
     import html as _html
-    out = ["<table><thead><tr><th></th>"]
+    out = ["<table><thead><tr><th class=n></th>"]
     head = rows[0] if rows else []
     out += [f"<th>{_html.escape(str(c))}</th>" for c in head]
     out.append("</tr></thead><tbody>")
@@ -166,6 +169,14 @@ def _table_html(rows) -> str:
     return "".join(out)
 
 
+#: Longest cell the table renderer will print in full. A Discord or Google
+#: takeout row carries an entire JSON blob in one field -- 302 KB in one cell
+#: in the demo corpus -- and pasting that into a <td> makes a pane no reviewer
+#: can scroll. The tail is dropped for display only; nothing here is written
+#: back, and the metrics panel still reads the untouched bytes.
+_MAX_CELL = 4000
+
+
 def _rows_from_csv(data: bytes):
     import csv, io as _io
     text = data.decode("utf8", errors="replace")
@@ -174,7 +185,19 @@ def _rows_from_csv(data: bytes):
         dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
     except Exception:  # noqa: BLE001
         dialect = csv.excel
-    return list(csv.reader(_io.StringIO(text), dialect))
+    # csv defaults to a 128 KB field cap and raises past it. That exception was
+    # the download bug: the table route failed, view() fell through to the raw
+    # byte route, and the browser saved users.csv to disk instead of showing
+    # it. Lift the cap for this parse only -- it is process-global state, so it
+    # is restored even when the read raises.
+    was = csv.field_size_limit()
+    try:
+        csv.field_size_limit(max(was, len(text) + 1))
+        rows = list(csv.reader(_io.StringIO(text), dialect))
+    finally:
+        csv.field_size_limit(was)
+    return [[c if len(c) <= _MAX_CELL else c[:_MAX_CELL] + " …" for c in r]
+            for r in rows]
 
 
 def _col_index(ref: str) -> int:
@@ -186,6 +209,108 @@ def _col_index(ref: str) -> int:
             break
         n = n * 26 + (ord(ch.upper()) - 64)
     return max(0, n - 1)
+
+
+_DOCX_CHROME = re.compile(r"word/(?:header|footer)\d*\.xml$")
+
+
+def _text_from_docx(data: bytes) -> str:
+    """Paragraph and table text of a .docx, using only the standard library.
+
+    Same bargain as _rows_from_xlsx: a docx is a zip of XML, so the no-
+    dependency rule costs nothing. Without this every Word document fell
+    through to the raw byte route and the browser SAVED it instead of showing
+    it -- which in a redaction review means the one format most likely to
+    carry an offer letter or a contract could not be eyeballed at all.
+
+    Paragraph splits are what matter here. A run boundary lands mid-sentence
+    wherever the author changed formatting, and the rewriter frequently
+    replaces a name that spans two runs, so joining runs without a separator
+    is the only way the two panes stay comparable line for line.
+    """
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        have = set(z.namelist())
+        body = next((n for n in ("word/document.xml", "word/document2.xml")
+                     if n in have), None)
+        if body is None:
+            raise ValueError("no word/document.xml")
+        # Headers and footers carry running contact blocks -- the offer letter
+        # in the eval corpus keeps its author's email only in footer1. Reading
+        # the body alone would show that address as absent from BOTH panes,
+        # which reads as "clean" when it is really "not looked at".
+        chrome = sorted(n for n in have
+                        if _DOCX_CHROME.match(n))
+        parts = [z.read(n) for n in [body, *chrome]]
+
+    roots = []
+    for raw in parts:
+        try:
+            roots.append(ET.fromstring(raw))
+        except ET.ParseError:
+            continue
+
+    out: list[str] = []
+    for para in (p for r in roots for p in r.iter(f"{W}p")):
+        buf: list[str] = []
+        for node in para.iter():
+            tag = node.tag
+            if tag == f"{W}t":
+                buf.append(node.text or "")
+            elif tag in (f"{W}tab",):
+                buf.append("\t")
+            elif tag in (f"{W}br", f"{W}cr"):
+                buf.append("\n")
+        line = "".join(buf)
+        if line.strip() or (out and out[-1].strip()):
+            out.append(line)
+        if len(out) > _MAX_ROWS:
+            out.append("... more paragraphs not shown")
+            break
+    return "\n".join(out).strip()
+
+
+def _text_from_pptx(data: bytes) -> str:
+    """Slide text of a .pptx, in slide order, standard library only.
+
+    Decks reach a redaction review as customer-facing collateral -- the QBR
+    with the account contacts on slide 2 -- and every one of them used to end
+    at the raw byte route, which is to say at a download. Slides are numbered
+    rather than sorted as strings so slide10 does not land between slide1 and
+    slide2, and the number is printed because "which slide" is the first thing
+    a reviewer writes in a comment.
+    """
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        names = [n for n in z.namelist()
+                 if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)]
+        if not names:
+            raise ValueError("no ppt/slides")
+        names.sort(key=lambda n: int(re.search(r"(\d+)", n.rsplit("/", 1)[1]).group(1)))
+        parts = [(n, z.read(n)) for n in names]
+
+    out: list[str] = []
+    for name, raw in parts:
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError:
+            continue
+        n = re.search(r"(\d+)", name.rsplit("/", 1)[1]).group(1)
+        out.append(f"--- slide {n} ---")
+        for para in root.iter(f"{A}p"):
+            line = "".join(t.text or "" for t in para.iter(f"{A}t"))
+            out.append(line)
+        out.append("")
+        if len(out) > _MAX_ROWS:
+            out.append("... more slides not shown")
+            break
+    return "\n".join(out).strip()
 
 
 def _rows_from_xlsx(data: bytes):
@@ -234,8 +359,38 @@ def _rows_from_xlsx(data: bytes):
         return rows
 
 
+def _looks_textual(data: bytes) -> str | None:
+    """The decoded text if these bytes are readable, else None.
+
+    The extension lists will always trail the corpus -- every batch turns up
+    some ``.ndjson`` or ``.properties`` nobody listed. Sniffing catches those
+    without a new release, which matters because the alternative was not "a
+    plainer view", it was a save dialog.
+    """
+    head = data[:8192]
+    if b"\x00" in head:
+        return None
+    try:
+        text = data.decode("utf8")
+    except UnicodeDecodeError:
+        return None
+    # Control characters other than tab/newline/return mean binary that merely
+    # happens to decode.
+    if sum(c < 32 and c not in (9, 10, 13) for c in head) > len(head) // 100:
+        return None
+    return text
+
+
 def view(key: str, data: bytes) -> dict:
-    """How this document should be shown, and the payload to show it with."""
+    """How this document should be shown, and the payload to show it with.
+
+    Never returns a shape the browser would download. Every branch ends at
+    something the page draws itself, at the PDF plugin, or at an explicit
+    "cannot show this" card -- because an iframe pointed at a document Chrome
+    will not render does not fail visibly, it silently saves the file and
+    leaves the pane blank.
+    """
+    import html as _html
     ext = Path(key).suffix.lower()
     if ext == ".pdf":
         return {"kind": "pdf"}
@@ -244,15 +399,34 @@ def view(key: str, data: bytes) -> dict:
             return {"kind": "table", "html": _table_html(_rows_from_csv(data))}
         if ext in _SHEET_EXTS:
             return {"kind": "table", "html": _table_html(_rows_from_xlsx(data))}
+        if ext in _WORD_EXTS:
+            return {"kind": "text",
+                    "html": f"<pre>{_html.escape(_text_from_docx(data))}</pre>"}
+        if ext in _SLIDE_EXTS:
+            return {"kind": "text",
+                    "html": f"<pre>{_html.escape(_text_from_pptx(data))}</pre>"}
         if ext in _TEXT_EXTS:
-            import html as _html
             return {"kind": "text",
                     "html": f"<pre>{_html.escape(data.decode('utf8', 'replace'))}</pre>"}
         if ext in _IMAGE_EXTS:
             return {"kind": "image"}
-    except Exception as exc:  # noqa: BLE001 -- fall back to the raw byte route
-        return {"kind": "other", "why": f"{type(exc).__name__}: {exc}"[:200]}
-    return {"kind": "other"}
+        sniffed = _looks_textual(data)
+        if sniffed is not None:
+            return {"kind": "text", "html": f"<pre>{_html.escape(sniffed)}</pre>"}
+    except Exception as exc:  # noqa: BLE001 -- shown on the card, not swallowed
+        return {"kind": "other", "ext": ext,
+                "why": f"{type(exc).__name__}: {exc}"[:200]}
+    return {"kind": "other", "ext": ext,
+            "why": _CANNOT.get(ext, "no viewer for this file type")}
+
+
+#: Formats with no standard-library reader. Saying so on the card beats the
+#: old behaviour, which was to hand the bytes to the browser and hope.
+_CANNOT = {
+    ".doc": "legacy binary Word — re-export as .docx to review it here",
+    ".xls": "legacy binary Excel — re-export as .xlsx to review it here",
+    ".ppt": "legacy binary PowerPoint — re-export as .pptx to review it here",
+}
 
 
 def session_id(left: str, right: str) -> str:
@@ -264,12 +438,17 @@ def session_id(left: str, right: str) -> str:
 PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Review</title><style>
 .doc{background:#fff;padding:10px 12px}
-.doc table{border-collapse:collapse;font-size:12.5px;width:100%}
+/* Fixed layout, not auto. One takeout row carries a multi-kilobyte JSON blob,
+   and auto layout hands that column the whole pane -- every other heading
+   collapses to one letter per line and the two sides stop lining up. Fixed
+   gives each column an equal share and lets the long one wrap. */
+.doc table{border-collapse:collapse;font-size:12.5px;width:100%;table-layout:fixed}
 .doc th,.doc td{border:1px solid #e3e6ea;padding:3px 6px;text-align:left;
-  vertical-align:top;white-space:pre-wrap;word-break:break-word}
-.doc thead th{position:sticky;top:0;background:#f5f6f8;font-weight:600;z-index:1}
-.doc td.n{color:#999;text-align:right;font-variant-numeric:tabular-nums;
-  background:#fafbfc;width:1%;white-space:nowrap}
+  vertical-align:top;white-space:pre-wrap;overflow-wrap:anywhere}
+.doc thead th{position:sticky;top:0;background:#f5f6f8;font-weight:600;z-index:1;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.doc th.n,.doc td.n{color:#999;text-align:right;font-variant-numeric:tabular-nums;
+  background:#fafbfc;width:42px;white-space:nowrap}
 .doc pre{margin:0;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
   white-space:pre-wrap;word-break:break-word}
 .doc .more{color:#888;font-size:12px;padding:6px 2px}
@@ -385,6 +564,8 @@ h2.r{color:var(--ok)}
 .scroll{flex:1;overflow:auto;background:#eef0f2;padding:10px 0;min-height:0}
 .scroll img,.scroll .ph{display:block;margin:0 auto 10px;background:#fff;box-shadow:0 1px 5px rgba(0,0,0,.15)}
 .empty{flex:1;display:grid;place-items:center;color:var(--mut);font-size:13px;text-align:center;padding:26px}
+.empty .why{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;opacity:.8}
+.empty .raw{display:inline-block;margin-top:10px;color:var(--fg);text-decoration:underline}
 
 footer{border-top:1px solid var(--line);padding:6px 12px;font-size:11.5px;color:var(--mut);
  display:flex;gap:14px;align-items:center;flex-wrap:wrap;flex:0 0 auto}
@@ -648,7 +829,24 @@ function build_pane(box,side,id,meta){
     const img=new Image(); img.src="/doc/"+side+"/"+id; img.style.width="100%";
     sc.appendChild(img); box.appendChild(sc); return sc;
   }
-  if(meta.kind!=="pdf"){box.appendChild(iframeFor(side,id));return null;}
+  if(meta.kind==="other"){
+    // Never an iframe. Chrome does not "fail to render" a .doc or a broken
+    // xlsx -- it saves it, silently, once per pane per refresh, and leaves
+    // the reviewer looking at a blank box wondering why Downloads is full.
+    // Say what it is, and make the download something they choose.
+    const why=meta.why?("<br><span class=why>"+esc(meta.why)+"</span>"):"";
+    box.innerHTML="<div class='empty'><b>Can't show this one here.</b>"+why+
+      "<br><a class='raw' href='/doc/"+side+"/"+id+"' download>Download the raw file</a></div>";
+    return null;
+  }
+  if(meta.kind==="raw"){box.appendChild(iframeFor(side,id));return null;}
+  if(meta.kind!=="pdf"||!meta.pages){
+    // "none", or any shape a future server sends that this page predates.
+    // The old catch-all was the iframe, i.e. a download; this one is a
+    // sentence.
+    box.innerHTML="<div class='empty'>Nothing to show for this side.</div>";
+    return null;
+  }
   const sc=document.createElement("div"); sc.className="scroll";
   const W=Math.max(280,(box.clientWidth||600)-24);
   meta.pages.forEach((sz,n)=>{
@@ -693,7 +891,7 @@ function step_page(d){
 }
 async function panes(p){
   const seq=++SEQ; LS=RS=null; PAGE=1;
-  let lm={kind:"other"},rm={kind:"none"};
+  let lm={kind:"other",why:"could not ask the server about this document"},rm={kind:"none"};
   if(CAN){ try{
     lm=await (await fetch("/api/doc/left/"+p.id)).json();
     if(p.right) rm=await (await fetch("/api/doc/right/"+p.id)).json();
@@ -1113,12 +1311,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 shape = view(key, data)
                 if shape["kind"] == "pdf":
                     if not RENDER.available:
-                        return self._json({"kind": "other"})
+                        # The one type the browser really does display in a
+                        # frame. Kept on the iframe route deliberately: without
+                        # PyMuPDF the plugin viewer is the only way to read a
+                        # PDF here, and it shows rather than saves.
+                        return self._json({"kind": "raw"})
                     return self._json({"kind": "pdf",
                                        "pages": RENDER.pages(f"{side}:{sid}", data)})
                 return self._json(shape)
-            except Exception as exc:  # noqa: BLE001 -- fall back to the plugin
-                return self._json({"kind": "other", "why": str(exc)[:200]})
+            except Exception as exc:  # noqa: BLE001 -- surfaced on the card
+                return self._json({"kind": "other",
+                                   "why": f"{type(exc).__name__}: {exc}"[:200]})
         if path.startswith("/page/"):
             try:
                 _, _, side, sid, n = path.split("/", 4)
