@@ -195,7 +195,7 @@ def out_of_scope(left_dirs, right_dirs):
     return dropped
 
 
-def align_renamed(lb: dict, rb: dict) -> dict:
+def align_renamed(lb: dict, rb: dict, lsize=None, rsize=None) -> dict:
     """Map source folders onto output folders whose NAME was rewritten.
 
     The pipeline redacts the identity folder itself:
@@ -220,7 +220,23 @@ def align_renamed(lb: dict, rb: dict) -> dict:
                 out[d[:k]].setdefault(d[k], set()).add(d[k + 1:])
         return out
 
+    def profile(buckets, name_at, sizer):
+        """Byte sizes of a folder's files, keyed by path relative to it."""
+        out: dict[tuple, dict[tuple, int]] = defaultdict(dict)
+        for d, files in buckets.items():
+            for k in range(1, len(d)):
+                key = d[:k] + (d[k],)
+                for f in files:
+                    # Relative to the NORMALISED bucket, not the raw path: the
+                    # bucket already has the selector segment ("raw", "out")
+                    # dropped, so indexing the raw segments by len(d) lands one
+                    # level off and every profile came out empty.
+                    out[key][d[k + 1:] + (segments(f)[-1],)] = sizer(f) if sizer else 0
+        return out
+
     li, ri = index(lb), index(rb)
+    lp = profile(lb, None, lsize) if lsize else {}
+    rp = profile(rb, None, rsize) if rsize else {}
     rename: dict[tuple, tuple] = {}
     for parent, lkids in li.items():
         rkids = ri.get(parent)
@@ -246,7 +262,62 @@ def align_renamed(lb: dict, rb: dict) -> dict:
             # as a leak. Where the shape is ambiguous, leave it alone.
             if len(lnames) == 1 and len(rnames) == 1:
                 rename[parent + (lnames[0],)] = parent + (rnames[0],)
+            elif lnames and rnames and lp and rp:
+                rename.update(_by_size(parent, lnames, rnames, lp, rp))
     return rename
+
+
+#: How close two folders' byte profiles must be to count as the same folder,
+#: and how much better than the runner-up. Redaction moves sizes a little --
+#: a name becomes a different-length name -- but not by a third, and a
+#: different person's mailbox is nowhere near.
+_SIZE_MAX_DIFF = 0.30
+_SIZE_MARGIN = 1.6
+
+
+def _by_size(parent, lnames, rnames, lp, rp) -> dict:
+    """Folders with the same SHAPE told apart by how many bytes are in them.
+
+    Three people in a calendar export all have acl, calendars and two pages of
+    events, so the shape says nothing about which is which -- and their names
+    have been rewritten. What is left is the sizes: a person's mailbox has a
+    byte profile, redaction nudges it without reshaping it, and someone else's
+    is nowhere near.
+
+    A match is taken only when it is both close in absolute terms and clearly
+    better than the runner-up. Otherwise the folders stay unpaired: putting
+    one person's source beside another's output makes every difference look
+    like a leak, which is worse than showing nothing.
+    """
+    def score(a: dict, b: dict) -> float:
+        keys = set(a) & set(b)
+        if not keys:
+            return 1.0
+        num = sum(abs(a[k] - b[k]) for k in keys)
+        den = sum(max(a[k], b[k]) for k in keys) or 1
+        return num / den
+
+    out, taken = {}, set()
+    for lname in sorted(lnames):
+        la = lp.get(parent + (lname,))
+        if not la:
+            continue
+        ranked = sorted(((score(la, rp.get(parent + (r,), {})), r)
+                         for r in rnames if r not in taken))
+        if not ranked:
+            continue
+        best, rname = ranked[0]
+        runner = ranked[1][0] if len(ranked) > 1 else None
+        # A tie is the absence of evidence, not the presence of it. Four
+        # one-byte files all score a perfect zero against each other, and an
+        # earlier version read that as four perfect matches and paired them at
+        # random. The runner-up has to be worse, not equal.
+        clear = (runner is None
+                 or (runner > best if best == 0 else runner >= best * _SIZE_MARGIN))
+        if best <= _SIZE_MAX_DIFF and clear:
+            taken.add(rname)
+            out[parent + (lname,)] = parent + (rname,)
+    return out
 
 
 def apply_rename(d: tuple, rename: dict) -> tuple:
@@ -320,7 +391,9 @@ def build(left_store, right_store, ignore=None, left_only=None, right_only=None,
         rb[normalise(p, ignore)[:-1]].append(p)
 
     # Where a folder level was rewritten, line the two trees up before pairing.
-    rename = align_renamed(lb, rb)
+    rename = align_renamed(lb, rb,
+                           lambda p: size_of(p, left=True),
+                           lambda p: size_of(p))
 
     pairs: list[dict] = []
     used_r: set[str] = set()
