@@ -914,6 +914,7 @@ function start(r){
     || (r.root||"").replace(/\/+$/,"").split("/").pop() || r.root || "review";
   el("loc").textContent=where; el("loc").title=r.root||"";
   document.title=where+" · "+(r.pairs?r.pairs.length:0)+" docs";
+  THIN=r.thinned||{};
   if(r.hint){el("btext").textContent=r.hint.text;el("bfix").textContent="use "+r.hint.output+"/";
     el("bfix").onclick=()=>{el("out").value=r.hint.output;el("banner").classList.remove("on");open_();};
     el("bfix").style.display=""; el("banner").classList.add("on");}
@@ -955,15 +956,31 @@ function list(){
   const auto = q() && groups.size<=12;
 
   const add=(name,files,isAll)=>{
-    let done=0,miss=0;
-    files.forEach(p=>{ if(rec(p).reviewed) done++; if(p.how==="missing") miss++; });
+    let done=0,miss=0,note=0;
+    files.forEach(p=>{const x=rec(p); if(x.reviewed) done++; note+=x.comments.length;
+      if(p.how==="missing") miss++; });
     const full = done>=files.length && files.length>0;
+    // What is worth knowing per folder is how much of the app is on screen
+    // and how far through it you are. "5/920" answered neither: it read as
+    // 915 outstanding when 920 was already a sample of 28,035.
+    // For "Everything" the held-back count is the sum across apps, or the row
+    // claims the whole run is complete while each app under it says otherwise.
+    const more = isAll ? Object.values(THIN||{}).reduce((a,b)=>a+b,0)
+                       : ((THIN&&THIN[name])||0);
+    const left = files.length-done;
+    const bits = [];
+    if(more) bits.push(`${files.length} of ${files.length+more} sampled`);
+    else bits.push(`${files.length} file${files.length===1?"":"s"}`);
+    if(done) bits.push(done===files.length?"all reviewed":`${done} reviewed`);
+    else if(left) bits.push(`${left} to go`);
+    if(note) bits.push(`${note} comment${note===1?"":"s"}`);
+    if(miss) bits.push(`<span class="w">${miss} missing</span>`);
     const opened = isAll ? false : (OPEN===name || auto);
     const d=document.createElement("div");
     d.className="fold"; d.setAttribute("aria-current", isAll?(ENT===null):(ENT===name));
     d.innerHTML=`<span class="ic">${isAll?ICON.all:(full?ICON.done:(opened?ICON.open:ICON.folder))}</span>
-      <span class="tx"><div class="n">${isAll?"All folders":esc(name)}</div>
-      <div class="m">${done}/${files.length}${miss?` · <span class="w">${miss} missing</span>`:""}</div></span>`;
+      <span class="tx"><div class="n">${isAll?"Everything":esc(name)}</div>
+      <div class="m">${bits.join(" · ")}</div></span>`;
     d.onclick=()=>{
       if(isAll){ENT=null;OPEN=null;}
       // Click toggles: a second click on the open folder closes it again.
@@ -1009,7 +1026,7 @@ el("hideside").onclick=()=>toggleSide(false);
 el("showside").onclick=()=>toggleSide(true);
 
 /* ---------- panes ---------- */
-let PAGE=1,LS=null,RS=null,BUSY=false,SEQ=0,INFO=false,MSEQ=0;
+let PAGE=1,LS=null,RS=null,BUSY=false,SEQ=0,INFO=false,MSEQ=0,THIN={};
 function iframeFor(side,id){const f=document.createElement("iframe");
  f.src="/doc/"+side+"/"+id+(PAGE>1?"#page="+PAGE:""); return f;}
 function build_pane(box,side,id,meta){
@@ -1443,12 +1460,18 @@ def open_review(root=None, left=None, right=None, profile=None,
          "label": "/".join(pairing.normalise(p["left"], ign))}
         for n, p in enumerate(idx["pairs"])
     ]
-    # A source document with nothing opposite it belongs in the review -- that
-    # is exactly the case a reviewer must see -- so it is listed with an empty
-    # right pane rather than dropped from the count.
-    for lp in idx["unmatched_left"]:
-        rows.append({"id": len(rows), "left": lp, "right": None, "how": "missing",
-                     "label": "/".join(pairing.normalise(lp, ign))})
+    # "Missing" is only meaningful when both halves were listed WHOLE. The
+    # listing stops after a bounded number of pages, so on a large export a
+    # counterpart can be absent from the index and present in the bucket --
+    # and a row saying "nothing in the output for this document" is then a
+    # false alarm about the pipeline, which is the most expensive kind of
+    # wrong this tool can be. Where the walk was truncated, say nothing rather
+    # than something untrue.
+    partial = bool(getattr(ls, "capped", False) or getattr(rs, "capped", False))
+    if not partial:
+        for lp in idx["unmatched_left"]:
+            rows.append({"id": len(rows), "left": lp, "right": None, "how": "missing",
+                         "label": "/".join(pairing.normalise(lp, ign))})
     rows.sort(key=lambda r: r["label"])
     rows, thinned = _thin(rows, per_app)
     for n, r in enumerate(rows):
@@ -1478,7 +1501,8 @@ def open_review(root=None, left=None, right=None, profile=None,
 
     counts = dict(idx["counts"])
     counts["by_how"] = dict(counts["by_how"])
-    counts["by_how"]["missing"] = len(idx["unmatched_left"])
+    counts["by_how"]["missing"] = 0 if partial else len(idx["unmatched_left"])
+    counts["partial"] = partial
     print(f"  {len(rows)} documents  {counts['by_how']}", flush=True)
     if idx["unmatched_right"]:
         print(f"  {len(idx['unmatched_right'])} output file(s) with no source", flush=True)
@@ -1492,7 +1516,7 @@ def open_review(root=None, left=None, right=None, profile=None,
                           sorted(thinned.items(), key=lambda t: -t[1])[:4])
         print(f"  showing {per_app} per app — not shown: {named}", flush=True)
 
-    units = idx.get("out_of_scope_units") or {}
+    units = {} if partial else (idx.get("out_of_scope_units") or {})
     scope_note = None
     if units:
         ranked = sorted(units.items(), key=lambda t: -t[1])
@@ -1513,8 +1537,8 @@ def open_review(root=None, left=None, right=None, profile=None,
     # dropped everything. So check whether another folder would do better and
     # offer it, rather than letting a wrong choice read as a catastrophic run.
     hint = None
-    missing = len(idx["unmatched_left"])
-    if root and rows and missing / len(rows) > 0.5:
+    missing = 0 if partial else len(idx["unmatched_left"])
+    if root and rows and missing and missing / len(rows) > 0.5:
         guess = pairing.autosplit([p for p in ls.paths if "__MACOSX" not in p])
         # Never offer a folder that the SOURCE is made of. On the run this was
         # written against the banner said "jira/ holds far more — that is
@@ -1541,7 +1565,7 @@ def open_review(root=None, left=None, right=None, profile=None,
     session = {"pairs": rows, "marks": marks, "counts": counts,
                "left": S["left"], "right": S["right"], "hint": hint,
                "scope_note": scope_note,
-               "thinned": thinned,
+               "thinned": thinned, "partial": partial, "per_app": per_app,
                "left_short": short(ls, source), "right_short": short(rs, output),
                "source": source, "output": output, "root": root,
                # What the browser tab is named. Two tabs on two batches are

@@ -195,6 +195,68 @@ def out_of_scope(left_dirs, right_dirs):
     return dropped
 
 
+def align_renamed(lb: dict, rb: dict) -> dict:
+    """Map source folders onto output folders whose NAME was rewritten.
+
+    The pipeline redacts the identity folder itself:
+    ``google_calendar/anirudh.trivedi@inc42.com/events`` ships as
+    ``google_calendar/cyniria.selridge@example.com/events``. The two trees then
+    bucket to different keys, nothing pairs by folder, and everything falls to
+    the last-resort join on filename alone -- which only accepts names unique
+    on BOTH sides, and every file in a paginated export is ``page_000001``.
+    google_calendar paired 1 document out of 26 that way.
+
+    The names are gone but the SHAPE is not. Under each person sits the same
+    arrangement of connectors and pages, so a source folder and its output
+    counterpart carry the same set of relative paths beneath them. Match on
+    that: exact signature first, then the best remaining overlap, both sides
+    used once. A folder with nothing like it stays unmatched rather than being
+    forced onto the nearest stranger.
+    """
+    def index(buckets):
+        out: dict[tuple, dict[str, set]] = defaultdict(dict)
+        for d in buckets:
+            for k in range(1, len(d)):
+                out[d[:k]].setdefault(d[k], set()).add(d[k + 1:])
+        return out
+
+    li, ri = index(lb), index(rb)
+    rename: dict[tuple, tuple] = {}
+    for parent, lkids in li.items():
+        rkids = ri.get(parent)
+        if not rkids:
+            continue
+        # Only where the level really was rewritten. If a name carries over,
+        # the folders correspond already and guessing would only break them.
+        if set(lkids) & set(rkids):
+            continue
+        lsigs, rsigs = defaultdict(list), defaultdict(list)
+        for name, sig in lkids.items():
+            lsigs[frozenset(sig)].append(name)
+        for name, sig in rkids.items():
+            rsigs[frozenset(sig)].append(name)
+        for sig, lnames in lsigs.items():
+            rnames = rsigs.get(sig, [])
+            # One on each side, or there is no evidence which maps to which.
+            # A paginated export gives every person the SAME shape -- acl,
+            # calendars, two pages of events -- so several folders share one
+            # signature and picking among them is a coin flip. Getting it
+            # wrong is worse than not pairing: it puts one person's source
+            # beside another person's output, and every difference then reads
+            # as a leak. Where the shape is ambiguous, leave it alone.
+            if len(lnames) == 1 and len(rnames) == 1:
+                rename[parent + (lnames[0],)] = parent + (rnames[0],)
+    return rename
+
+
+def apply_rename(d: tuple, rename: dict) -> tuple:
+    """``d`` with every renamed ancestor swapped for its output name."""
+    for k in range(len(d), 0, -1):
+        if d[:k] in rename:
+            return rename[d[:k]] + d[k:]
+    return d
+
+
 def build(left_store, right_store, ignore=None, left_only=None, right_only=None,
           left_exclude=None, right_exclude=None):
     """Index one review.
@@ -257,10 +319,13 @@ def build(left_store, right_store, ignore=None, left_only=None, right_only=None,
     for p in R:
         rb[normalise(p, ignore)[:-1]].append(p)
 
+    # Where a folder level was rewritten, line the two trees up before pairing.
+    rename = align_renamed(lb, rb)
+
     pairs: list[dict] = []
     used_r: set[str] = set()
     for folder, ls in lb.items():
-        rs = [r for r in rb.get(folder, []) if r not in used_r]
+        rs = [r for r in rb.get(apply_rename(folder, rename), []) if r not in used_r]
         for l, r, how in _match_bucket(ls, rs, size_of):
             pairs.append({"left": l, "right": r, "how": how, "folder": "/".join(folder)})
             used_r.add(r)
