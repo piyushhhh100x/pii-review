@@ -49,6 +49,116 @@ class Docs(unittest.TestCase):
         self.assertFalse(stores.is_doc("a/pii_mappings.db"))
 
 
+class Formatting(unittest.TestCase):
+    """Structured formats get ONE shape, so the two panes can be compared.
+
+    The pipeline reserialises what it rewrites: a source record reads
+    ``{"a":1}`` and its own output reads ``{"a": 1}``. Same data, different
+    spacing, so the panes wrapped differently and scroll sync lined up
+    unrelated lines. Formatting both sides here is what fixes that.
+    """
+
+    def test_the_two_spellings_of_one_record_format_identically(self):
+        compact = b'{"id":"10022","author":{"emailAddress":"a@b.com"}}'
+        spaced = b'{"id": "10022", "author": {"emailAddress": "a@b.com"}}'
+        self.assertEqual(review.view("a.json", compact)["html"],
+                         review.view("a.json", spaced)["html"])
+
+    def test_json_is_indented_and_highlighted(self):
+        out = review.view("a.json", b'{"emailAddress":"a@b.com","n":3,"ok":true}')
+        self.assertEqual(out["kind"], "text")
+        self.assertIn('<span class=jk>"emailAddress"</span>', out["html"])
+        self.assertIn('<span class=js>"a@b.com"</span>', out["html"])
+        self.assertIn('<span class=jn>3</span>', out["html"])
+        self.assertIn('<span class=jb>true</span>', out["html"])
+
+    def test_a_colon_inside_a_value_is_not_read_as_a_key(self):
+        # The corpus is full of "content":"https://host/x?a=b:c". A regex
+        # highlighter marks that inner colon as a separator; walking the
+        # parsed object cannot.
+        out = review.view("a.json", b'{"content":"https://h/x?a=b:c"}')
+        self.assertIn('<span class=js>"https://h/x?a=b:c"</span>', out["html"])
+        self.assertEqual(out["html"].count("class=jk"), 1)
+
+    def test_jsonl_is_one_numbered_record_per_row(self):
+        data = b'{"a":1}\n{"a":2}\n\n{"a":3}\n'
+        out = review.view("a.jsonl", data)
+        self.assertEqual(out["kind"], "records")
+        self.assertEqual(out["html"].count('class=rec>'), 3)   # blank line skipped
+        self.assertIn('<div class=recn>3</div>', out["html"])
+
+    def test_a_broken_jsonl_line_is_shown_not_swallowed(self):
+        # "the rewriter emitted broken JSON" is itself the finding.
+        out = review.view("a.jsonl", b'{"a":1}\nnot json at all\n')
+        self.assertEqual(out["kind"], "records")
+        self.assertIn("not json at all", out["html"])
+        self.assertIn("class=jbad", out["html"])
+
+    def test_unparseable_json_falls_back_to_raw_text(self):
+        out = review.view("a.json", b"{not json")
+        self.assertEqual(out["kind"], "text")
+        self.assertIn("{not json", out["html"])
+
+    def test_xml_is_indented(self):
+        out = review.view("a.xml", b"<a><b>x</b><c>y</c></a>")
+        self.assertEqual(out["kind"], "text")
+        self.assertIn("&lt;b&gt;x&lt;/b&gt;", out["html"])
+        self.assertNotIn("\n\n", out["html"])
+
+    def test_a_huge_jsonl_is_capped_and_says_so(self):
+        data = b"\n".join(b'{"a":%d}' % n for n in range(900))
+        out = review.view("a.jsonl", data)
+        self.assertIn("more records not shown", out["html"])
+        self.assertLess(out["html"].count('class=rec>'), 900)
+
+
+class Planning(unittest.TestCase):
+    """Several locations means several reviews, one browser tab each."""
+
+    class Args:
+        root = None; pair = None; left = None; right = None; label = None
+
+    def plan(self, **kw):
+        a = self.Args()
+        for k, v in kw.items():
+            setattr(a, k, v)
+        return review.plan(a)
+
+    def test_one_location_is_one_review(self):
+        self.assertEqual(len(self.plan(root=["/tmp/a"])), 1)
+
+    def test_three_locations_are_three_reviews(self):
+        jobs = self.plan(root=["/tmp/a", "/tmp/b", "/tmp/c"])
+        self.assertEqual([j["root"] for j in jobs], ["/tmp/a", "/tmp/b", "/tmp/c"])
+
+    def test_each_review_gets_a_name_of_its_own(self):
+        # Three identical tab titles is how a reviewer ends up marking the
+        # wrong run as clean.
+        jobs = self.plan(root=["s3://b/run-a", "s3://b/run-b"])
+        self.assertEqual([j["label"] for j in jobs], ["run-a", "run-b"])
+
+    def test_pair_is_repeatable_and_names_both_halves(self):
+        jobs = self.plan(pair=[["s3://b/src", "s3://b/out"],
+                               ["/x/raw", "/x/files"]])
+        self.assertEqual(len(jobs), 2)
+        self.assertEqual(jobs[0]["left"], "s3://b/src")
+        self.assertEqual(jobs[0]["right"], "s3://b/out")
+        self.assertIn("src", jobs[0]["label"])
+        self.assertIn("out", jobs[0]["label"])
+
+    def test_roots_and_pairs_compose(self):
+        jobs = self.plan(root=["/tmp/a"], pair=[["/x/raw", "/x/files"]])
+        self.assertEqual(len(jobs), 2)
+
+    def test_the_old_left_right_flags_still_work(self):
+        jobs = self.plan(left="/x/raw", right="/x/files")
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["right"], "/x/files")
+
+    def test_nothing_asked_for_is_no_jobs(self):
+        self.assertEqual(self.plan(), [])
+
+
 class S3Urls(unittest.TestCase):
     """Every shape an S3 location arrives in must open.
 
@@ -169,7 +279,7 @@ class Viewing(unittest.TestCase):
         self.assertEqual(csv.field_size_limit(), before)
 
     def test_an_unlisted_text_format_is_sniffed_not_downloaded(self):
-        out = review.view("export.ndjson", b'{"email":"a@b.com"}\n{"email":"c@d.com"}\n')
+        out = review.view("app.properties", b"mail.from=a@b.com\nmail.to=c@d.com\n")
         self.assertEqual(out["kind"], "text")
         self.assertIn("a@b.com", out["html"])
 
@@ -209,7 +319,7 @@ class Viewing(unittest.TestCase):
                            ("a.png", b"\x89PNG"), ("a.pdf", b"%PDF-1.4"),
                            ("a.weird", b"\xff\xfe\x00\x01")):
             self.assertIn(review.view(name, data)["kind"],
-                          {"table", "text", "image", "pdf", "other"}, name)
+                          {"table", "text", "records", "image", "pdf", "other"}, name)
 
 
 class Layout(unittest.TestCase):

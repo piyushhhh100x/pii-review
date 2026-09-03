@@ -29,6 +29,23 @@ Skip the popup:
 
 Quote a console URL — the `&` will otherwise background your shell.
 
+## Several at once
+
+Give more than one location, or repeat `--pair`, and each opens in its own
+tab on its own port. Verdicts are keyed by the pair of locations, so the tabs
+never overwrite each other.
+
+```
+./review ~/Downloads/run-a ~/Downloads/run-b ~/Downloads/run-c
+
+./review --profile sail \
+  --pair s3://bkt/export s3://bkt/export-pii \
+  --pair s3://bkt/export/unit-a s3://bkt/export-pii/unit-a
+```
+
+Use `--pair` when the two halves are siblings rather than nested. Ctrl-C stops
+all of them.
+
 Python 3.9+, standard library only. Nothing is installed. PDFs scroll in step
 if PyMuPDF is importable by any interpreter on the box; without it they fall
 back to the browser's viewer.

@@ -127,6 +127,53 @@ def _match_bucket(left: list[str], right: list[str], size_of) -> list[tuple]:
     return out
 
 
+#: How deep a branch can be and still be called a "unit" -- the thing a run is
+#: organised by (a customer, a user, a connector export). Runs come in
+#: ``<unit>/raw`` and ``<org>/<unit>/...`` shapes, so one and two both occur.
+#: Below this, an absent counterpart is a withheld document, not a unit the run
+#: was never pointed at, and it belongs in the review.
+_UNIT_DEPTH = 2
+
+
+def out_of_scope(left_dirs, right_dirs):
+    """Source branches the output covers NOTHING of, as ``{unit: [dirs]}``.
+
+    A bucket can hold several runs' worth of export. Point at it and every
+    document from every OTHER run reads as "nothing in the output for this
+    document" -- 9,083 of 9,779 rows in the run this was written against, all
+    of them from a unit the pipeline was simply never given. That buries the
+    696 rows worth reviewing and looks exactly like a catastrophic failure.
+
+    The test is deliberately blunt: walk down from the root, and at the first
+    level where the output tree branches at all, a source branch whose name is
+    absent there was not part of this run. Not "mostly absent" -- absent. One
+    output file anywhere beneath a branch keeps the whole branch in, because
+    then the run did reach it and everything missing under it is a finding.
+
+    Depth-capped at ``_UNIT_DEPTH``. A whole connector dropped from a unit the
+    run DID process is a defect the reviewer has to see, and it sits deeper
+    than this.
+    """
+    prefixes = set()
+    for d in right_dirs:
+        for n in range(1, len(d) + 1):
+            prefixes.add(d[:n])
+
+    dropped: dict[str, list] = {}
+    for d in left_dirs:
+        k = 0
+        while k < len(d) and d[:k + 1] in prefixes:
+            k += 1
+        if k >= len(d) or k + 1 > _UNIT_DEPTH:
+            continue
+        # The output must actually branch here, or "absent" means nothing --
+        # it just means the trees diverge at this point for both halves.
+        if not any(len(pre) == k + 1 and pre[:k] == d[:k] for pre in prefixes):
+            continue
+        dropped.setdefault("/".join(d[:k + 1]), []).append(d)
+    return dropped
+
+
 def build(left_store, right_store, ignore=None, left_only=None, right_only=None,
           left_exclude=None, right_exclude=None):
     """Index one review.
@@ -201,6 +248,7 @@ def build(left_store, right_store, ignore=None, left_only=None, right_only=None,
     leftover_l = [p for p in L if p not in paired_l]
     leftover_r = [p for p in R if p not in used_r]
 
+
     # A last global pass on filename alone, for trees whose folder structure
     # does not correspond at all.
     #
@@ -221,11 +269,30 @@ def build(left_store, right_store, ignore=None, left_only=None, right_only=None,
             leftover_l.remove(l)
             leftover_r.remove(r)
 
+    # Only now, once every route to a counterpart has been tried: source
+    # branches the output covers nothing of were never in this run. Held back
+    # from the index rather than dropped silently -- the caller reports them,
+    # because "this bucket holds another run too" is worth knowing and is not
+    # the same fact as "the pipeline withheld a document".
+    #
+    # After the name pass, not before. Run first, this discarded the very
+    # paths that pass exists to rescue: a tree whose folders do not correspond
+    # at all looks branch-for-branch uncovered right up until the filenames
+    # match it up.
+    scope = out_of_scope({normalise(p, ignore)[:-1] for p in leftover_l}, set(rb))
+    skipped = {d for dirs in scope.values() for d in dirs}
+    off = [p for p in leftover_l if normalise(p, ignore)[:-1] in skipped]
+    leftover_l = [p for p in leftover_l if normalise(p, ignore)[:-1] not in skipped]
+
     pairs.sort(key=lambda p: normalise(p["left"], ignore))
     return {
         "pairs": pairs,
         "unmatched_left": sorted(leftover_l),
         "unmatched_right": sorted(leftover_r),
+        "out_of_scope": sorted(off),
+        "out_of_scope_units": {u: sum(1 for p in off
+                                      if normalise(p, ignore)[:-1] in set(dirs))
+                               for u, dirs in scope.items()},
         "counts": {
             "left_docs": len(L), "right_docs": len(R),
             "by_how": dict(Counter(p["how"] for p in pairs)),
