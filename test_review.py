@@ -862,3 +862,139 @@ class EndToEnd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class FolderNames(unittest.TestCase):
+    """A folder name is part of the deliverable and appears in neither pane."""
+
+    def test_an_email_folder_reads_as_personal(self):
+        self.assertEqual(pairing.looks_personal("anirudh.trivedi@inc42.com"),
+                         "an email address")
+
+    def test_a_dotted_name_reads_as_personal(self):
+        self.assertEqual(pairing.looks_personal("siddarth.ramaswamy"),
+                         "a person's name")
+
+    def test_structure_is_not_a_person(self):
+        # Every one of these is a real folder from a run under review. A false
+        # flag here costs the reviewer's trust in every true one.
+        for name in ("gmail", "google_calendar", "data-platform", "canvases.json",
+                     "video-mkt-des", "daily_seo-marketing", "sre", "_pages",
+                     "users.json", "bigshift-demodays"):
+            self.assertIsNone(pairing.looks_personal(name), name)
+
+    def test_a_conversation_is_named_after_people(self):
+        self.assertTrue(pairing.looks_personal("dm_ashish_sharma"))
+        self.assertTrue(pairing.looks_personal("mpdm-riya--manoj--ashish.sharma-1"))
+
+    def test_an_opaque_id_is_not_a_person(self):
+        # Google Chat names a thread after its id and the export doubles it.
+        # Fourteen of these were announced as people in one run, which is how
+        # a flag stops being read.
+        for n in ("SQAiwJUCNsA.SQAiwJUCNsA", "fofzhGfNqDc.fofzhGfNqDc"):
+            self.assertIsNone(pairing.looks_personal(n), n)
+
+    def _map(self, pairs, **kw):
+        return {r["path"]: r for r in
+                pairing.folder_map(pairs, set(pairing.DEFAULT_IGNORE), **kw)}
+
+    def test_a_renamed_identity_is_reported_with_what_it_became(self):
+        pairs = [{"left": f"gmail/anirudh.trivedi@inc42.com/m/p{n}.json",
+                  "right": f"gmail/cyniria.selridge@example.com/m/p{n}.json"}
+                 for n in range(3)]
+        row = self._map(pairs)["gmail/anirudh.trivedi@inc42.com"]
+        self.assertEqual(row["state"], "changed")
+        self.assertEqual(row["out"], "cyniria.selridge@example.com")
+        # A rewritten name is doing its job whatever it used to look like.
+        self.assertIsNone(row["risk"])
+
+    def test_an_identity_the_output_kept_is_flagged(self):
+        pairs = [{"left": "slack/dm_ashish_sharma/a.json",
+                  "right": "slack/dm_ashish_sharma/a.json"}]
+        row = self._map(pairs)["slack/dm_ashish_sharma"]
+        self.assertEqual(row["state"], "kept")
+        self.assertTrue(row["risk"])
+
+    def test_two_people_collapsed_into_one_identity_is_reported(self):
+        pairs = [{"left": "gmail/a.person@x.com/m.json",
+                  "right": "gmail/fake.one@example.com/m.json"},
+                 {"left": "gmail/b.person@x.com/m.json",
+                  "right": "gmail/fake.one@example.com/m.json"}]
+        rows = self._map(pairs)
+        self.assertEqual(rows["gmail/a.person@x.com"]["shared"],
+                         ["gmail/b.person@x.com"])
+
+    def test_a_capped_listing_never_claims_a_folder_is_absent(self):
+        # Same rule as "missing": absent from a truncated listing is not
+        # absent from the run, and saying so about a whole person is the most
+        # expensive thing this tool can get wrong.
+        dirs = {("slack", "dm_ashish_sharma")}
+        self.assertEqual(self._map([], left_dirs=dirs, partial=True), {})
+        self.assertIn("slack/dm_ashish_sharma",
+                      self._map([], left_dirs=dirs, partial=False))
+
+    def test_trees_of_different_depth_invent_nothing(self):
+        # No level corresponds to any other, so there is no "became".
+        pairs = [{"left": "a/b/c/f.json", "right": "z/f.json"}]
+        self.assertEqual(self._map(pairs), {})
+
+
+class Descent(unittest.TestCase):
+    """Where the key budget is spent decides what the reviewer sees."""
+
+    class Fake(stores.S3Store):
+        def __init__(self, tree):
+            self.tree, self.walked = tree, []
+            self.bucket, self.prefix, self.profile, self.region = "b", "", None, None
+            self.cap, self.capped, self._size_map = 1, False, {}
+            self._client = object()
+
+        def _children(self, base):
+            return sorted({base + p[len(base):].split("/")[0] + "/"
+                           for p in self.tree if p.startswith(base)
+                           and "/" in p[len(base):]})
+
+        def _walk(self, prefix):
+            self.walked.append(prefix)
+            return [], {}
+
+    def test_a_narrow_fork_is_descended_so_each_person_gets_a_budget(self):
+        # Six people under gmail, one shared budget of five thousand keys:
+        # the source reached three of them and the output one, the two slices
+        # barely overlapped, and 4,861 documents paired 2.
+        tree = [f"gmail/p{n}@x.com/messages/page_{m}.json"
+                for n in range(6) for m in range(3)]
+        s = self.Fake(tree)
+        leaves, parents = s._branches("")
+        self.assertEqual(len(leaves), 6)
+        self.assertTrue(all(l.startswith("gmail/p") for l in leaves))
+        self.assertIn("gmail/", parents)
+
+    def test_a_wide_fork_does_not_stop_a_narrow_sibling_descending(self):
+        # slack forks a hundred ways and stays whole; gmail forks six ways and
+        # is descended. Letting slack veto the descent is what made the source
+        # stop a level above the output, which have different apps in them.
+        tree = [f"gmail/p{n}@x.com/m/f.json" for n in range(6)]
+        tree += [f"slack/c{n}/f.json" for n in range(100)]
+        leaves, _ = self.Fake(tree)._branches("")
+        self.assertIn("slack/", leaves)
+        self.assertEqual(sum(1 for l in leaves if l.startswith("gmail/")), 6)
+
+    def test_files_beside_a_folder_the_descent_stepped_past_are_still_walked(self):
+        # slack/canvases.json sits under none of the leaves.
+        tree = [f"gmail/p{n}@x.com/m/f.json" for n in range(3)] + ["gmail/index.json"]
+        s = self.Fake(tree)
+        _, parents = s._branches("")
+        self.assertIn("gmail/", parents)
+
+
+class SearchesEverything(unittest.TestCase):
+    """The sample is what you review; a search is how you find a reported file."""
+
+    def test_ids_are_stable_across_the_whole_run_not_the_sample(self):
+        rows = [{"label": f"app/f{n}.json", "id": n} for n in range(50)]
+        kept, _ = review._thin(list(rows), 5, "salt")
+        # Every kept row still answers to the id it had in the full run, so a
+        # search hit outside the sample names a row the server can open.
+        self.assertTrue(all(r["id"] == int(r["label"][5:-5]) for r in kept))
+        self.assertEqual(len(kept), 5)

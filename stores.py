@@ -293,6 +293,14 @@ class S3Store(Store):
     SCAN_PAGES = 5
     DEFAULT_CAP = 1  # any truthy value: the bound is SCAN_PAGES, not a count
 
+    #: How far the delimited descent goes looking for the level to budget at,
+    #: how wide a fork it will step through, and how many branches it will
+    #: carry in total. See ``_branches`` -- the three together are what make
+    #: the key cap survivable.
+    BRANCH_DEPTH = 4
+    WIDE = 12
+    MAX_BRANCHES = 64
+
     def __init__(self, spec: str, profile: str | None = None,
                  region: str | None = None, cap: int | None = -1):
         uri = parse_s3(spec)
@@ -375,22 +383,65 @@ class S3Store(Store):
             if not token:
                 return keys, sizes
 
-    def _branches(self, base: str, depth: int = 2) -> list[str]:
-        """Child folders of ``base``, descended while the tree is still narrow.
+    def _branches(self, base: str, depth: int | None = None):
+        """The level to spend the key budget at, and the parents above it.
 
-        One level is not enough. A gmail export is ``gmail/<person>/...`` --
-        a single top-level folder -- so a per-branch sample taken at depth 1
-        is a sample of one branch, i.e. all of it from one person. Descending
-        while there are few branches turns that into a sample per person,
-        which is what "a few files per app" actually means.
+        The budget is per branch, so WHERE the branches are decided is what
+        the reviewer actually sees. Stopping one level too high is not a
+        smaller sample, it is a broken review: ``gmail/`` holds six people in
+        both halves, and one shared budget of five thousand keys reached three
+        of them on the source side and one on the output side. The two slices
+        barely overlapped, 4,861 source documents paired 2, and the sidebar
+        said gmail had two files in it.
+
+        So descend until the branches are the smallest units that still fit in
+        one parallel sweep. Then each person is budgeted separately, both
+        halves cut their subtree at the same relative depth, and the keys line
+        up because an export lists in the same order on both sides.
+
+        Returns the leaves to walk and every prefix descended through, which
+        the caller shallow-walks: a file sitting directly in ``slack/`` is
+        under none of the leaves and would otherwise vanish the moment the
+        descent stepped past it.
         """
-        out = self._children(base)
-        while depth > 1 and 0 < len(out) <= 4:
-            deeper = [c for b in out for c in self._children(b)]
-            if not deeper:
+        depth = self.BRANCH_DEPTH if depth is None else depth
+        frontier, done, parents = self._children(base), [], [base]
+        for _ in range(max(0, depth - 1)):
+            if not frontier:
                 break
-            out, depth = deeper, depth - 1
-        return out
+            kids = self._map(self._children, frontier)
+            # Per branch, not per level. ``slack/`` forks a hundred ways and a
+            # flat walk across it already samples every channel; ``gmail/``
+            # forks six ways and each fork is a person with thirty thousand
+            # keys, so one shared budget reaches one person. Letting the wide
+            # fork stop the narrow ones from descending is exactly the bug:
+            # the source stayed at connector level because of slack while the
+            # output, which has no slack, went a level deeper, and the two
+            # halves then sampled different parts of the same tree.
+            wide = {b for b, k in zip(frontier, kids) if not k or len(k) > self.WIDE}
+            grew = [b for b in frontier if b not in wide]
+            if not grew:
+                break
+            nxt = [c for b, k in zip(frontier, kids) if b not in wide for c in k]
+            stay = [b for b in frontier if b in wide]
+            # Past the bound the sweep stops being parallel and starts being a
+            # few hundred round trips, which is the blank screen this whole
+            # scheme exists to avoid.
+            if len(done) + len(stay) + len(nxt) > self.MAX_BRANCHES:
+                break
+            parents += grew
+            done += stay
+            frontier = nxt
+        return done + frontier, parents
+
+    def _map(self, fn, items):
+        """``fn`` over ``items``, in parallel. Each call is one round trip and
+        there are a few dozen of them; sequentially that is the descent taking
+        longer than the walk it is setting up."""
+        if len(items) <= 1:
+            return [fn(i) for i in items]
+        with cf.ThreadPoolExecutor(max_workers=min(16, len(items))) as ex:
+            return list(ex.map(fn, items))
 
     def _children(self, base: str) -> list[str]:
         """Immediate child folders of ``base``, one cheap delimited call."""
@@ -416,12 +467,12 @@ class S3Store(Store):
             # is the key listing, and document bytes are still read one at a
             # time, on demand, as the reviewer arrives at them.
             keys = []
-            branches = self._branches(base)
-            if len(branches) > 1:
-                with cf.ThreadPoolExecutor(max_workers=min(16, len(branches))) as ex:
-                    parts = list(ex.map(self._walk, branches))
-                # Keys sitting directly in base, alongside the folders.
-                parts.append(self._walk_shallow(base))
+            branches, parents = self._branches(base)
+            if branches:
+                parts = self._map(self._walk, branches)
+                # Keys sitting directly in a folder the descent stepped past,
+                # alongside its subfolders. One delimited call each.
+                parts += self._map(self._walk_shallow, parents)
                 for k, sz in parts:
                     keys += k
                     self._size_map.update(sz)

@@ -624,6 +624,16 @@ def read_mappings(spec: str, profile: str | None = None, store=None,
             tmp.write(data)
             tmp.close()
             hit = tmp.name
+        elif stores.parse_s3(spec):
+            # A database named directly by URI. Split off the filename and
+            # read that one key -- no listing, so pointing at a database in a
+            # bucket costs one request.
+            base, _, name = stores.parse_s3(spec)[0].rstrip("/").rpartition("/")
+            data = stores.S3Store(base, profile=profile).read(name)
+            tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+            tmp.write(data)
+            tmp.close()
+            hit = tmp.name
         else:
             local = Path(spec).expanduser()
             if not local.exists():
@@ -834,16 +844,16 @@ header{border-bottom:1px solid var(--line);padding:7px 12px;display:flex;gap:10p
 #body.narrow.info{grid-template-columns:1fr 268px}
 /* The mapping table, over the panes. A modal because verifying a substitution
    is a detour from reviewing documents, not a thing you do beside it. */
-#mveil{position:fixed;inset:0;background:rgba(26,29,33,.34);display:none;z-index:70;padding:34px}
-#mveil.on{display:grid;place-items:center}
-#mbox{background:#fff;border-radius:10px;width:min(980px,96vw);max-height:86vh;
+#mveil,#fveil{position:fixed;inset:0;background:rgba(26,29,33,.34);display:none;z-index:70;padding:34px}
+#mveil.on,#fveil.on{display:grid;place-items:center}
+#mbox,#fbox{background:#fff;border-radius:10px;width:min(980px,96vw);max-height:86vh;
   display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,.22)}
 .mhead{display:flex;gap:10px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line)}
 .mhead input{flex:1;font:12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
   padding:5px 8px;border:1px solid var(--line);border-radius:6px}
-#mbody{overflow:auto;padding:0 14px 14px}
-#mbody table{border-collapse:collapse;width:100%;font-size:12.5px;table-layout:fixed}
-#mbody td{padding:4px 6px;border-bottom:1px solid #f0f2f4;vertical-align:top;
+#mbody,#fbody{overflow:auto;padding:0 14px 14px}
+#mbody table,#fbody table{border-collapse:collapse;width:100%;font-size:12.5px;table-layout:fixed}
+#mbody td,#fbody td{padding:4px 6px;border-bottom:1px solid #f0f2f4;vertical-align:top;
   word-break:normal;overflow-wrap:break-word;
   font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
 #mbody td.o{color:var(--bad);width:42%}
@@ -860,9 +870,27 @@ header{border-bottom:1px solid var(--line);padding:7px 12px;display:flex;gap:10p
   padding:2px 4px;border-radius:4px}
 .lnk:hover{color:var(--fg);background:var(--soft)}
 .mmore{margin:6px 0 0;font-size:12px;text-decoration:underline}
+.askmap{display:flex;gap:8px;margin:10px 0}
+.askmap input{flex:1;font:12.5px ui-monospace,SFMono-Regular,Menlo,monospace;
+  padding:6px 8px;border:1px solid var(--line);border-radius:6px}
+.more.bad{color:var(--bad)}
+.icobtn.off{opacity:.5}
 .mnotes{margin-top:3px;display:flex;flex-wrap:wrap;gap:4px}
 .mnote{background:#fff8e6;border:1px solid #f0e2bd;color:#6b5a2a;border-radius:4px;
   padding:1px 6px;font:11.5px/1.5 ui-sans-serif,-apple-system,sans-serif}
+#info .paths{font:11px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;
+  margin:0 0 7px;word-break:break-all}
+#info .paths b{color:var(--mut);font-weight:400;margin-right:6px}
+/* The folder audit. Same modal, different question: not "what did this value
+   become" but "what did this FOLDER become", which is the half of the
+   deliverable that never appears in either pane. */
+#fbody td.fn{width:40%}
+#fbody td.fo{color:var(--ok)}
+#fbody td.fo i{color:var(--mut)}
+#fbody td.fp{color:var(--mut);font-size:11.5px}
+#fbody tr.risk td.fn{color:var(--bad)}
+.why{display:block;color:#8a6d1f;font:11.5px/1.5 ui-sans-serif,-apple-system,sans-serif}
+.fsec p.lead{color:var(--mut);font-size:12px;margin:0 0 8px}
 #info{display:none;border-left:1px solid var(--line);background:#fcfcfd;overflow:auto;min-height:0;padding:12px 13px 26px}
 #body.info #info{display:block}
 #info h3{font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--mut);
@@ -896,12 +924,30 @@ header{border-bottom:1px solid var(--line);padding:7px 12px;display:flex;gap:10p
 .file .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .dot{flex:0 0 auto;width:6px;height:6px;border-radius:50%;background:var(--line)}
 .dot.viewed{background:#c9ced3}.dot.reviewed{background:var(--ok)}.dot.missing{background:#e8c893}
+/* A hit from outside the sample. It reviews and marks like any other row --
+   the only thing worth saying is that it is not part of the hundred this
+   machine was dealt, so finding it again means searching for it again. */
+.file.extra .t{color:#7a5cc4}
+#snote{display:none;padding:5px 10px 7px;font-size:11px;color:var(--mut);
+ border-bottom:1px solid var(--line);line-height:1.45}
+#snote.on{display:block}
 
 main{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);min-height:0}
 section{background:#fff;display:flex;flex-direction:column;min-width:0;min-height:0}
 h2{margin:0;padding:5px 12px;font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--mut);
  background:var(--soft);border-bottom:1px solid var(--line);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 h2.r{color:var(--ok)}
+/* The heading carries the folder the document is sitting in, because a folder
+   name is itself part of what the pipeline had to redact and it appears
+   nowhere else on the screen. */
+h2{display:flex;align-items:baseline;gap:9px}
+h2 .hl{flex:0 0 auto}
+h2 .hp{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;
+ font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+ text-transform:none;letter-spacing:0;color:var(--mut)}
+h2 .keep{flex:0 0 auto;background:#fff8e6;border:1px solid #f0e2bd;color:#6b5a2a;
+ border-radius:4px;padding:0 6px;text-transform:none;letter-spacing:0;
+ font:11px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace}
 .pane{flex:1;display:flex;min-height:0;overflow:hidden}
 .pane iframe{flex:1;width:100%;border:0;min-height:0}
 .scroll{flex:1;overflow:auto;background:#eef0f2;padding:10px 0;min-height:0}
@@ -956,6 +1002,7 @@ kbd{font:11px ui-monospace,Menlo,monospace;background:var(--soft);border:1px sol
   <button id="rev"><span id="revic"></span><span id="revtx">Review</span></button>
   <input id="cbox" placeholder="add a comment…" spellcheck="false">
   <span class="count" id="count"></span>
+  <button class="icobtn" id="foldbtn" title="what every folder name became  (n)">Folder-names</button>
   <button class="icobtn" id="mapbtn" title="the run&#39;s PII mapping table  (m)">PII-mappings</button>
   <button class="icobtn" id="infobtn" title="details  (i)">i</button>
   <span id="split" title="change what is compared"></span>
@@ -963,16 +1010,26 @@ kbd{font:11px ui-monospace,Menlo,monospace;background:var(--soft);border:1px sol
 <div id="cbar"></div>
 <div id="body">
   <aside id="side">
-    <div class="top"><input id="q" placeholder="search files and folders" spellcheck="false">
+    <div class="top"><input id="q" placeholder="search every file in the run" spellcheck="false">
       <button class="icobtn" id="hideside" title="hide the list  (s)">&#171;</button></div>
+    <div id="snote"></div>
     <div id="list"></div>
   </aside>
   <main>
-    <section><h2 id="lh">Source</h2><div class="pane" id="lp"></div></section>
-    <section><h2 class="r" id="rh">Output</h2><div class="pane" id="rp"></div></section>
+    <section><h2><span class="hl" id="lh">Source</span><span class="hp" id="lhp"></span></h2>
+      <div class="pane" id="lp"></div></section>
+    <section><h2 class="r"><span class="hl" id="rh">Output</span><span class="keep" id="rhk"
+      style="display:none"></span><span class="hp" id="rhp"></span></h2>
+      <div class="pane" id="rp"></div></section>
   </main>
   <aside id="info"></aside>
 </div>
+<div id="fveil"><div id="fbox">
+  <div class="mhead"><b>Folder-names</b><span id="fcount" class="opt"></span>
+    <input id="fq" placeholder="search a folder name, source or output" spellcheck="false">
+    <span class="x" id="fx">&times;</span></div>
+  <div id="fbody"></div>
+</div></div>
 <div id="mveil"><div id="mbox">
   <div class="mhead"><b>PII-mappings</b><span id="mcount" class="opt"></span>
     <input id="mq" placeholder="search original, replacement or type" spellcheck="false">
@@ -983,6 +1040,7 @@ kbd{font:11px ui-monospace,Menlo,monospace;background:var(--soft);border:1px sol
   <span><kbd>enter</kbd> review + next · <kbd>r</kbd> review · <kbd>c</kbd> comment</span>
   <span><kbd>&uarr;</kbd><kbd>&darr;</kbd> file · <kbd>&larr;</kbd><kbd>&rarr;</kbd> folder · <kbd>[</kbd><kbd>]</kbd> page</span>
   <span><kbd>a</kbd> <span id="mode">unreviewed only</span></span>
+  <span id="foldfoot" class="clik"><kbd>n</kbd> Folder-names</span>
   <span id="mapfoot" class="clik"><kbd>m</kbd> PII-mappings</span>
   <span><kbd>s</kbd> list · <kbd>i</kbd> details · <kbd>y</kbd> <span id="syn">sync on</span> · <kbd>?</kbd> keys</span>
   <input id="jump" placeholder="jump # or name">
@@ -1093,7 +1151,10 @@ function start(r){
   THIN=r.thinned||{};
   TOTB=(r.pairs||[]).reduce((a,p)=>a+(p.lb||0),0);
   HASMAP=!!r.has_map;
-  el("mapbtn").style.display=HASMAP?"flex":"none";
+  // Always present. Hiding it meant a reviewer whose run shipped no database
+  // saw no button, no explanation and no way in -- which is exactly what the
+  // QA pass reported as "cannot open mappings".
+  el("mapbtn").classList.toggle("off",!HASMAP);
   el("mapfoot").style.display=HASMAP?"":"none";
   if(r.hint){el("btext").textContent=r.hint.text;el("bfix").textContent="use "+r.hint.output+"/";
     el("bfix").onclick=()=>{el("out").value=r.hint.output;el("banner").classList.remove("on");open_();};
@@ -1116,19 +1177,26 @@ el("split").onclick=()=>{el("app").style.display="none";el("veil").classList.add
   if(!twoWay&&el("root").value.trim())inspect();};
 
 /* ---------- list ---------- */
+let EXTRA=[], SMORE=0, SSEQ=0, SQ=null, TOTAL=0;
+/* What the list is drawn from. Normally the sample -- the hundred per app
+   this machine was dealt. While a search is running it is the sample plus
+   every pair in the run that matched, because "find the file they reported"
+   is a different job from "review your share", and answering it out of a
+   hundred rows per app would miss it almost every time. */
+function pool(){return q()? ALL.concat(EXTRA) : ALL;}
 const entOf=p=>p.label.split("/")[0];
 const restOf=p=>p.label.split("/").slice(1).join("/");
 function q(){return el("q").value.trim().toLowerCase();}
 function matches(p){const s=q(); return !s || p.label.toLowerCase().includes(s);}
 function build(){
-  let v = ALL.filter(matches);
+  let v = pool().filter(matches);
   if(ENT) v = v.filter(p=>entOf(p)===ENT);
   VIEW = onlyNew ? v.filter(p=>!rec(p).reviewed) : v;
   if(i>=VIEW.length) i=Math.max(0,VIEW.length-1);
 }
 function list(){
   const box=el("list"); box.innerHTML="";
-  const hits=ALL.filter(matches);
+  const hits=pool().filter(matches);
   const groups=new Map();
   hits.forEach(p=>{const e=entOf(p); if(!groups.has(e))groups.set(e,[]); groups.get(e).push(p);});
   // A search that matches files opens the folders holding them, so the hits
@@ -1175,7 +1243,8 @@ function list(){
     if(!isAll && opened) files.forEach(p=>{
       const r=rec(p);
       const cls = r.reviewed?"reviewed":(p.how==="missing"?"missing":(r.viewed?"viewed":""));
-      const f=document.createElement("div"); f.className="file";
+      const f=document.createElement("div");
+      f.className="file"+(p.sampled===false?" extra":"");
       f.setAttribute("aria-current", !!(VIEW[i]&&VIEW[i].id===p.id));
       f.innerHTML=`<span class="dot ${cls}"></span><span class="ic">${fileIcon(restOf(p))}</span><span class="t">${esc(restOf(p))}</span>`;
       f.title=p.label;
@@ -1189,9 +1258,36 @@ function list(){
   if(!q()) add("all", ALL, true);
   [...groups.keys()].sort().forEach(n=>add(n,groups.get(n),false));
 }
-el("q").addEventListener("input",()=>{i=0;build();list();render();});
+el("q").addEventListener("input",()=>{
+  i=0;build();list();render();
+  clearTimeout(SQ); SQ=setTimeout(search,200);
+});
+async function search(){
+  const s=q();
+  if(!s){EXTRA=[];SMORE=0;snote();build();list();render();return;}
+  const seq=++SSEQ;
+  let r; try{ r=await(await fetch("/api/search?q="+encodeURIComponent(s))).json(); }
+  catch(e){ return; }
+  // A slow response for a query that has since been retyped would replace the
+  // list under the cursor with the wrong run of files.
+  if(seq!==SSEQ || q()!==s) return;
+  const have=new Set(ALL.map(p=>p.id));
+  EXTRA=(r.rows||[]).filter(p=>!have.has(p.id));
+  SMORE=Math.max(0,(r.matched||0)-(r.rows||[]).length);
+  snote(r);
+  build(); list(); render();
+}
+function snote(r){
+  const box=el("snote");
+  if(!q()||!r){box.classList.remove("on");box.textContent="";return;}
+  const bits=[`${num(r.matched)} of ${num(r.total)} files match`];
+  if(EXTRA.length) bits.push(`${num(EXTRA.length)} outside your sample`);
+  if(SMORE) bits.push(`showing the first ${num(r.rows.length)}`);
+  box.textContent=bits.join(" · ");
+  box.classList.add("on");
+}
 
-function folders(){return [...new Set(ALL.filter(matches).map(entOf))].sort();}
+function folders(){return [...new Set(pool().filter(matches).map(entOf))].sort();}
 function stepFolder(d){
   const ns=folders(); if(!ns.length)return;
   const at=ns.indexOf(ENT);
@@ -1331,7 +1427,7 @@ function dl(rows){return `<dl>${rows.map(([k,v,c])=>
   `<dt>${k}</dt><dd class="${c||""}">${v}</dd>`).join("")}</dl>`;}
 
 function folderStats(name){
-  const f=ALL.filter(p=>entOf(p)===name);
+  const f=pool().filter(p=>entOf(p)===name);
   let r=0,c=0,v=0,m=0;
   f.forEach(p=>{const x=rec(p); if(x.reviewed)r++; if(x.viewed||x.reviewed)v++;
     c+=x.comments.length; if(p.how==="missing")m++;});
@@ -1347,8 +1443,14 @@ async function details(){
   ALL.forEach(x=>{const y=rec(x); if(y.reviewed)run.r++; if(y.viewed||y.reviewed)run.v++;
     run.c+=y.comments.length; if(x.how==="missing")run.m++; run.f.add(entOf(x));});
 
+  const kept=(p.kept||[]);
   const tail =
-    `<h3>Folder</h3>${dl([["files",num(fs.n)],["reviewed",num(fs.r)],
+    `<h3>Folder</h3>`+
+    `<div class="paths"><div><b>src</b> ${esc(dirOf(p.left)||"/")}</div>`+
+    `<div class="${kept.length?"badrow":""}"><b>out</b> `+
+      `${p.right?esc(dirOf(p.right)||"/"):"nothing paired"}</div></div>`+
+    (kept.length?`<div class="why">${esc(kept.join(", "))} unchanged in the output</div>`:"")+
+    `${dl([["files",num(fs.n)],["reviewed",num(fs.r)],
       ["viewed",num(fs.v)],["comments",num(fs.c)],
       ["missing",num(fs.m),fs.m?"warnrow":""]])}` +
     `<h3>Run</h3>${dl([["folders",num(run.f.size)],["files",num(run.n)],
@@ -1422,12 +1524,33 @@ function head(){
   el("rev").classList.toggle("on",r.reviewed);
   el("revic").innerHTML=r.reviewed?ICON.tick:"";
   el("revtx").textContent=r.reviewed?"Reviewed":"Review";
+  paneHeads(p);
   comments(p); counters();
   return true;
 }
+/* The folder a document sits in, above the document. It is the one part of
+   the deliverable that has to be redacted too and the one part neither pane
+   ever shows: gmail/anirudh.trivedi@inc42.com/messages/page_000001.jsonl
+   names a person and their employer in the object key whatever the bytes
+   underneath look like. Any name the output kept AND that reads as personal
+   goes in a chip ahead of the path, where the truncation cannot eat it. */
+function dirOf(k){const b=(k||"").split("/"); b.pop(); return b.join("/");}
+function paneHeads(p){
+  el("lhp").textContent=dirOf(p.left); el("lhp").title=p.left||"";
+  el("rhp").textContent=p.right?dirOf(p.right):"";
+  el("rhp").title=p.right||"";
+  const keep=p.kept||[];
+  const chip=el("rhk");
+  chip.style.display=keep.length?"":"none";
+  chip.textContent=keep.length?"kept "+keep.join(", "):"";
+  chip.title=keep.length?
+    "The output left this folder name unchanged and it reads as personal data.":"";
+}
 function render(){
   if(!head()){ el("lp").innerHTML=el("rp").innerHTML=
-    "<div class='empty'>Nothing here. Press <b>a</b> for all files, or clear the search.</div>"; return; }
+    "<div class='empty'>Nothing here. Press <b>a</b> for all files, or clear the search."+
+    (q()?"<br><span class='why'>The search covered all "+num(TOTAL)+" pairs in the run, not just your sample.</span>":"")+
+    "</div>"; return; }
   const p=VIEW[i];
   const r=rec(p);
   // Opening a document is what "viewed" means; nothing to press.
@@ -1488,8 +1611,35 @@ el("jump").addEventListener("keydown",e=>{if(e.key==="Enter"){jump(e.target.valu
 
 let MAPQ=null;
 function maps(){
-  if(!HASMAP){alert("No mapping database for this run.\n\nPoint at one with --mappings /path/to/pii_mappings.db");return;}
-  el("mveil").classList.add("on"); el("mq").focus(); loadMaps();
+  el("mveil").classList.add("on");
+  // No database is the common case -- it is written beside the pipeline and
+  // often never uploaded -- so the panel asks for one rather than refusing to
+  // open. An alert saying "use --mappings" is useless to somebody who started
+  // the tool from a preset and cannot restart it.
+  if(!HASMAP){ el("mcount").textContent=""; askMap(); return; }
+  el("mq").focus(); loadMaps();
+}
+function askMap(err){
+  el("mbody").innerHTML=
+    `<p class="more">This run did not ship a mapping database. The pipeline `+
+    `writes <code>pii_mappings.db</code> beside the run and it is often not `+
+    `uploaded with the output \u2014 point at one and it opens here.</p>`+
+    `<div class="askmap"><input id="mspec" spellcheck="false" `+
+    `placeholder="~/runs/_pii/pii_mappings.db   or   s3://bucket/prefix/pii_mappings.db">`+
+    `<button class="mini" id="mgo">Open</button></div>`+
+    (err?`<p class="more bad">${esc(err)}</p>`:"");
+  const go=async()=>{
+    const spec=el("mspec").value.trim(); if(!spec)return;
+    el("mbody").innerHTML=`<p class="more">reading \u2026</p>`;
+    const r=await(await fetch("/api/usemap",{method:"POST",
+      body:JSON.stringify({spec})})).json();
+    if(r.error){askMap(r.error);return;}
+    HASMAP=true; el("mapbtn").classList.remove("off");
+    el("mq").focus(); loadMaps();
+  };
+  el("mgo").onclick=go;
+  el("mspec").addEventListener("keydown",e=>{if(e.key==="Enter")go();});
+  el("mspec").focus();
 }
 let OPENED={};                 // attribute type -> how many rows expanded to
 async function loadMaps(){
@@ -1537,6 +1687,89 @@ el("mbody").addEventListener("click",async e=>{
     body:JSON.stringify({key,text})});
   loadMaps();
 });
+/* ---------- folder names ---------- */
+/* The other half of the deliverable. A document's contents get two panes and
+   a diff; the folder it sits in gets nothing, and an identity folder that
+   kept its name leaks a person in the object key however clean the panes
+   look. This is that half, audited in one table. */
+let FALL=null, FPART=false, FOPEN={}, FSEQ=0;
+const FSEC=[
+ ["check","Worth a look",
+  "The name reads as personal data and the output kept it, or two source folders became one."],
+ ["changed","Rewritten","The pipeline gave these folders a new name."],
+ ["kept","Unchanged",
+  "The same name on both sides. Structure rather than identity \u2014 none of these reads as a person."],
+ ["none","Nothing paired underneath",
+  "No document under these folders found a counterpart, so there is no name to compare against."],
+];
+function fbucket(f){
+  if(f.risk||(f.shared&&f.shared.length)) return "check";
+  if(f.state==="changed") return "changed";
+  if(f.state==="none") return "none";
+  return "kept";
+}
+async function folds(){
+  el("fveil").classList.add("on"); el("fq").focus();
+  if(FALL===null){
+    el("fbody").innerHTML=`<p class="more">reading the tree\u2026</p>`;
+    const seq=++FSEQ;
+    let r; try{ r=await(await fetch("/api/folders")).json(); }
+    catch(e){ el("fbody").innerHTML=`<p class="more">${esc(String(e))}</p>`; return; }
+    if(seq!==FSEQ)return;
+    FALL=r.rows||[]; FPART=!!r.partial;
+  }
+  drawFolds();
+}
+function drawFolds(){
+  const s=el("fq").value.trim().toLowerCase();
+  const hit=FALL.filter(f=>!s||f.path.toLowerCase().includes(s)||
+                            (f.out||"").toLowerCase().includes(s));
+  const risky=hit.filter(f=>fbucket(f)==="check").length;
+  el("fcount").textContent = risky
+    ? `${risky} worth a look of ${hit.length} folders`
+    : `${hit.length} folders, none flagged`;
+  const html=FSEC.map(([kind,title,lead])=>{
+    const rows=hit.filter(f=>fbucket(f)===kind);
+    if(!rows.length) return "";
+    const n=FOPEN[kind]||25, show=rows.slice(0,n), left=rows.length-show.length;
+    const body=show.map(f=>{
+      const why=[];
+      if(f.risk) why.push(f.risk);
+      if(f.shared&&f.shared.length)
+        why.push(`also what ${f.shared.map(x=>x.split("/").pop()).join(", ")} became`);
+      if(f.also&&f.also.length)
+        why.push(`some documents here landed under ${f.also.slice(0,2).join(", ")} instead`);
+      return `<tr class="${f.risk?"risk":""}">`+
+        `<td class=fn>${esc(f.name)}<div class=fp>${esc(f.parent||"/")}</div></td>`+
+        `<td class=fo>${f.out==null?"<i>nothing paired</i>":
+            (f.out===f.name?"<i>unchanged</i>":esc(f.out))}`+
+          (why.length?`<span class=why>${esc(why.join(" \u00b7 "))}</span>`:"")+`</td>`+
+        `<td class=fp style="width:74px;text-align:right">${f.files?num(f.files):""}</td></tr>`;
+    }).join("");
+    return `<section class="mgrp fsec"><h4>${title}<span class=opt>${rows.length}</span></h4>`+
+      `<p class=lead>${lead}</p><table><tbody>${body}</tbody></table>`+
+      (left>0?`<button class="lnk fmore" data-k="${kind}" data-n="${n}">`+
+              `show ${Math.min(left,50)} more of ${left}</button>`:"")+
+      `</section>`;
+  }).join("");
+  el("fbody").innerHTML = (FPART
+    ? `<p class="more">The listing was capped, so folders with no counterpart are not `+
+      `reported here \u2014 absent from a partial listing is not absent from the run.</p>` : "")
+    + (html || `<p class="more">Nothing matches.</p>`);
+}
+el("fbody").addEventListener("click",e=>{
+  const more=e.target.closest(".fmore"); if(!more)return;
+  FOPEN[more.dataset.k]=parseInt(more.dataset.n,10)+50; drawFolds();
+});
+let FQT=null;
+el("fq").addEventListener("input",()=>{clearTimeout(FQT);
+  FOPEN={};   // a filtered list is a different list; carrying offsets over it
+  FQT=setTimeout(drawFolds,120);});
+el("fx").onclick=()=>el("fveil").classList.remove("on");
+el("fveil").onclick=e=>{if(e.target.id==="fveil")el("fveil").classList.remove("on");};
+el("foldbtn").onclick=()=>folds();
+el("foldfoot").onclick=()=>folds();
+
 el("mq").addEventListener("input",()=>{clearTimeout(MAPQ);
   OPENED={};   // a filtered list is a different list; carrying offsets over it
   MAPQ=setTimeout(loadMaps,180);});
@@ -1544,8 +1777,9 @@ el("mx").onclick=()=>el("mveil").classList.remove("on");
 el("mveil").onclick=e=>{if(e.target.id==="mveil")el("mveil").classList.remove("on");};
 
 addEventListener("keydown",e=>{
-  if(el("mveil").classList.contains("on")){
-    if(e.key==="Escape"){el("mveil").classList.remove("on");}
+  if(el("mveil").classList.contains("on")||el("fveil").classList.contains("on")){
+    if(e.key==="Escape"){el("mveil").classList.remove("on");
+                         el("fveil").classList.remove("on");}
     return;
   }
   if(el("app").style.display==="none")return;
@@ -1568,6 +1802,7 @@ addEventListener("keydown",e=>{
   else if(kl==="s"){e.preventDefault();toggleSide();}
   else if(kl==="i"){e.preventDefault();toggleInfo();}
   else if(kl==="m"){e.preventDefault();maps();}
+  else if(kl==="n"){e.preventDefault();folds();}
   else if(kl==="y"){e.preventDefault();SYNC=!SYNC;el("syn").textContent=SYNC?"sync on":"sync off";}
   else if(kl==="a"){e.preventDefault();onlyNew=!onlyNew;
     el("mode").textContent=onlyNew?"unreviewed only":"all files";build();list();render();}
@@ -1579,7 +1814,9 @@ addEventListener("keydown",e=>{
    "  right / left  next / previous folder\\n  ] / [         both panes one page\\n\\n"+
    "Mark\\n  r             reviewed on or off\\n  c             add a comment\\n\\n"+
    "View\\n  a             all files / unreviewed only\\n  s             show or hide the list\\n"+
-   "  y             scroll sync on or off\\n  /             search\\n  e             change what is compared");}
+   "  y             scroll sync on or off\\n  /             search\\n  e             change what is compared\\n\\n"+
+   "Check\\n  n             what every folder name became\\n  m             the run\u2019s PII mappings\\n"+
+   "  i             details for this document");}
 });
 
 fetch("/api/boot").then(r=>r.json()).then(b=>{
@@ -1654,6 +1891,11 @@ def inspect_root(root: str, profile: str | None) -> dict:
     out["root"] = st.spec
     return out
 
+
+#: Rows one search returns. A substring like "page" matches thirty thousand
+#: files and the reviewer wants the handful they were sent, so the list is
+#: bounded and the true count reported alongside it.
+SEARCH_MAX = 300
 
 #: Pairs kept per app folder. Nobody reviews an export end to end -- the job
 #: is a few files per app and a search for the handful somebody reported -- and
@@ -1731,6 +1973,22 @@ def _thin(rows, per_app: int, salt: str = ""):
     return kept, dropped
 
 
+def _kept_names(left: str, right: str | None, ign: set) -> list[str]:
+    """Folder names this document sits under that survived into the output
+    unchanged AND read as somebody's personal data.
+
+    Per document rather than per folder, so the warning lands on the screen
+    the reviewer is already looking at instead of only in the audit panel.
+    """
+    if not right:
+        return []
+    ln = pairing.normalise(left, ign)[:-1]
+    rn = pairing.normalise(right, ign)[:-1]
+    if len(ln) != len(rn):
+        return []
+    return [a for a, b in zip(ln, rn) if a == b and pairing.looks_personal(a)]
+
+
 def open_review(root=None, left=None, right=None, profile=None,
                 source=None, output=None, ignore=None, label=None,
                 per_app: int = PER_APP, mappings: str | None = None,
@@ -1770,11 +2028,31 @@ def open_review(root=None, left=None, right=None, profile=None,
             rows.append({"id": len(rows), "left": lp, "right": None, "how": "missing",
                          "lb": _bytes(ls, lp), "rb": 0,
                          "label": "/".join(pairing.normalise(lp, ign))})
+    # The folder NAMES are half the deliverable and appear in neither pane.
+    # ``gmail/anirudh.trivedi@inc42.com/messages/page_000001.jsonl`` names a
+    # person and their employer in the object key, whatever the documents
+    # under it look like, so the source-to-output correspondence is worked out
+    # once here and audited in its own panel.
+    left_dirs = {pairing.normalise(p, ign)[:-1]
+                 for p in idx["unmatched_left"] + idx["out_of_scope"]}
+    folders = pairing.folder_map(idx["pairs"], ign, left_dirs, partial)
+    for r in rows:
+        r["kept"] = _kept_names(r["left"], r["right"], ign)
+
     rows.sort(key=lambda r: r["label"])
-    salt = reviewer_salt(seed)
-    rows, thinned = _thin(rows, per_app, salt)
+    # Numbered over EVERY pair, before the sample is taken, and the whole set
+    # is kept. An id that meant "the nth row you were sent" made the documents
+    # outside the sample unopenable -- there was no id that named them -- so a
+    # search could find a reported file and then not show it. Numbering first
+    # costs nothing and makes every pair in the run addressable.
     for n, r in enumerate(rows):
         r["id"] = n
+    salt = reviewer_salt(seed)
+    every = rows
+    rows, thinned = _thin(rows, per_app, salt)
+    shown = {r["id"] for r in rows}
+    for r in every:
+        r["sampled"] = r["id"] in shown
 
     lname = f"{ls}::{source or ''}"
     rname = f"{rs}::{output or ''}"
@@ -1790,7 +2068,8 @@ def open_review(root=None, left=None, right=None, profile=None,
             map_spec, map_store, map_inner = f"{rs}/{inner}", rs, inner
 
     with _LOCK:
-        S.update(ready=True, rows=rows, left_store=ls, right_store=rs,
+        S.update(ready=True, rows=every, sample=rows, folders=folders,
+                 left_store=ls, right_store=rs,
                  profile=profile, sample_salt=salt,
                  map_spec=map_spec, map_store=map_store,
                  map_inner=map_inner,
@@ -1872,11 +2151,16 @@ def open_review(root=None, left=None, right=None, profile=None,
         return folder or Path(str(store).split(":", 1)[-1].rstrip("/")).name or str(store)
 
     session = {"pairs": rows, "marks": marks, "counts": counts,
+               "total": len(every),
                "left": S["left"], "right": S["right"], "hint": hint,
                "scope_note": scope_note,
                "thinned": thinned, "partial": partial, "per_app": per_app,
                "sample": salt[:6],
                "has_map": bool(map_spec),
+               # Enough for the header to say whether the panel is worth
+               # opening. The rows themselves come on demand.
+               "folder_risk": sum(1 for f in folders if f["risk"]),
+               "folder_count": len(folders),
                "left_short": short(ls, source), "right_short": short(rs, output),
                "source": source, "output": output, "root": root,
                # What the browser tab is named. Two tabs on two batches are
@@ -1946,6 +2230,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 out.update(S.get("session", {}))
             out["render"] = RENDER.available
             return self._json(out)
+        if path == "/api/search":
+            # Across every pair, not the sample. The sample is what you review
+            # by default; a search is what you do when somebody reports a file
+            # by name, and answering that from a hundred rows per app would
+            # miss it 99 times in 100.
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            look = (q.get("q") or [""])[0].strip().lower()
+            rows = S.get("rows") or []
+            if not look:
+                return self._json({"rows": [], "matched": 0, "total": len(rows)})
+            hit = [r for r in rows
+                   if look in r["label"].lower()
+                   or look in (r["right"] or "").lower()
+                   or look in r["left"].lower()]
+            return self._json({"rows": hit[:SEARCH_MAX], "matched": len(hit),
+                               "total": len(rows), "cap": SEARCH_MAX})
+        if path == "/api/folders":
+            # The whole audit in one response. There are three orders of
+            # magnitude fewer folders than mappings, so paging and searching
+            # them server-side would buy a round trip per keystroke and
+            # nothing else.
+            return self._json({"rows": S.get("folders", []),
+                               "partial": bool((S.get("session") or {}).get("partial"))})
         if path == "/api/mappings":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             try:
@@ -2081,6 +2388,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 ))
             except Exception as exc:  # noqa: BLE001 -- surfaced in the popup
                 return self._json({"error": f"{type(exc).__name__}: {exc}"})
+        if path == "/api/usemap":
+            # The run did not ship a database, which is the common case: it is
+            # written beside the pipeline and often never uploaded. Without
+            # this the only way to see the mappings was a command-line flag,
+            # so a reviewer running ./runs i1 had no route to them at all and
+            # the panel was simply a dead button.
+            spec = (body.get("spec") or "").strip()
+            if not spec:
+                return self._json({"error": "give a path or an s3:// URI"})
+            try:
+                out = read_mappings(spec, S.get("profile"))
+            except Exception as exc:  # noqa: BLE001 -- shown in the panel
+                return self._json({"error": f"{type(exc).__name__}: {exc}"[:200]})
+            with _LOCK:
+                S["map_spec"] = spec
+                S["map_store"] = None
+                S["map_inner"] = None
+                if S.get("session"):
+                    S["session"]["has_map"] = True
+            return self._json({"ok": True, "count": out["count"]})
         if path == "/api/mapnote":
             key, text = body.get("key"), (body.get("text") or "").strip()
             src = S.get("map_spec")

@@ -119,6 +119,18 @@ personal mobile is a leak. So is the opposite: a toll-free number, a column
 heading or a product name that got scrubbed. A right pane identical to the
 left means the redaction never ran; a blank one means it broke.
 
+The search box covers **every** pair in the run, not just your share. Type a
+path a teammate reported and it opens, whether or not it was dealt to you;
+hits from outside your sample are tinted and review exactly like the rest.
+
+Press `n`, or **Folder-names**, for what the pipeline did to the folder names
+themselves. A folder is part of the deliverable too:
+`gmail/anirudh.trivedi@inc42.com/messages/page_000001.jsonl` names a person and
+their employer in the object key however clean the two panes look, and neither
+pane shows it. The panel lists every folder beside what it became, and puts the
+ones that read as personal data and did NOT change at the top. The folder each
+document sits in is also printed above its pane, source against output.
+
 Two people on the same run get different files. The sample is seeded on a salt
 kept in `~/.pii-review-salt`, written once per machine — so your files stay the
 same across refreshes and re-clones, and your colleague's hundred is a
@@ -138,10 +150,12 @@ per type, search across all of them, and a comment you can leave on any row: eve
 it replaced it with, and the ones it found and left alone. Searchable, which
 is the only way to use thirty thousand substitutions. It is picked up from
 `_pii/pii_mappings.db` beside the output if the run shipped one, otherwise
-point at it:
+point at it — either on the command line or in the panel itself, which asks
+when the run shipped none:
 
 ```
 ./review --pair SRC OUT --profile sail --mappings ~/runs/_pii/pii_mappings.db
+./review --pair SRC OUT --profile sail --mappings s3://bucket/run/_pii/pii_mappings.db
 ```
 
 Verdicts save to `marks.json` as you go, keyed by the pair of locations, so
