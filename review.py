@@ -16,10 +16,15 @@ import http.server
 import io
 import json
 import mimetypes
+import random
 import re
 import socketserver
+import subprocess
+import sys
 import threading
+import time
 import urllib.parse
+import urllib.request
 import webbrowser
 from pathlib import Path
 
@@ -147,16 +152,29 @@ _TABLE_EXTS = {".csv", ".tsv"}
 _SHEET_EXTS = {".xlsx", ".xlsm"}
 _WORD_EXTS = {".docx", ".docm"}
 _SLIDE_EXTS = {".pptx", ".pptm"}
-_TEXT_EXTS = {".txt", ".md", ".json", ".jsonl", ".xml", ".html", ".htm",
+_JSON_EXTS = {".json", ".geojson", ".ipynb"}
+_JSONL_EXTS = {".jsonl", ".ndjson"}
+_XML_EXTS = {".xml", ".rss", ".atom", ".svg.xml"}
+_TEXT_EXTS = {".txt", ".md", ".html", ".htm",
               ".eml", ".log", ".yaml", ".yml", ".ini", ".cfg",
               ".sql", ".vcf", ".ics", ".env"}
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 
 
+#: Below this a column is too narrow to read, so the table is given a
+#: min-width and the pane scrolls sideways instead of crushing every column.
+#: A 40-column takeout sheet at table-layout:fixed gave each one about 15px.
+_MIN_COL_PX = 150
+
+
 def _table_html(rows) -> str:
     import html as _html
-    out = ["<table><thead><tr><th class=n></th>"]
     head = rows[0] if rows else []
+    cols = max((len(r) for r in rows), default=0)
+    # Only widen when it is actually needed. A three-column sheet should fill
+    # the pane, not sit in a 450px strip with the rest of the pane blank.
+    style = f' style="min-width:{cols * _MIN_COL_PX}px"' if cols > 6 else ""
+    out = [f"<table{style}><thead><tr><th class=n></th>"]
     out += [f"<th>{_html.escape(str(c))}</th>" for c in head]
     out.append("</tr></thead><tbody>")
     for n, row in enumerate(rows[1:_MAX_ROWS], 1):
@@ -175,6 +193,113 @@ def _table_html(rows) -> str:
 #: can scroll. The tail is dropped for display only; nothing here is written
 #: back, and the metrics panel still reads the untouched bytes.
 _MAX_CELL = 4000
+
+
+# --- structured text, formatted so the two panes line up --------------------
+# The pipeline reserialises what it rewrites. A source line reads
+# ``{"self":"...","id":"10022"`` and its own output reads
+# ``{"self": "https://...", "id": "10022"`` -- same data, different spacing,
+# so the panes wrapped differently and scroll sync compared unrelated lines.
+# Formatting BOTH sides with one formatter is what makes them comparable; the
+# highlighting is the part that makes a wall of JSON readable at all.
+
+_JSON_MAX_CHARS = 900_000
+#: Records of a .jsonl shown in full. Past this the file is a shard dump, and
+#: the reviewer wants the shape, not all of it.
+_JSONL_MAX_RECORDS = 400
+
+
+def _jhtml(obj, indent: int = 0, out=None) -> list:
+    """Pretty JSON as highlighted HTML, walked rather than regexed.
+
+    Emitting from the parsed object means the classes cannot land on the wrong
+    span: a colon inside a string value is a colon inside a string value, not
+    a key separator, which is exactly where a regex highlighter gives up on
+    the ``"content":"https://...?a=b:c"`` URLs all over this corpus.
+    """
+    import html as _html
+    out = [] if out is None else out
+    pad, pad2 = "  " * indent, "  " * (indent + 1)
+    if isinstance(obj, dict):
+        if not obj:
+            out.append('<span class=jp>{}</span>')
+            return out
+        out.append('<span class=jp>{</span>\n')
+        for n, (k, v) in enumerate(obj.items()):
+            out.append(pad2)
+            out.append(f'<span class=jk>"{_html.escape(str(k))}"</span>'
+                       '<span class=jp>: </span>')
+            _jhtml(v, indent + 1, out)
+            out.append('<span class=jp>,</span>\n' if n < len(obj) - 1 else "\n")
+        out.append(pad + '<span class=jp>}</span>')
+    elif isinstance(obj, list):
+        if not obj:
+            out.append('<span class=jp>[]</span>')
+            return out
+        out.append('<span class=jp>[</span>\n')
+        for n, v in enumerate(obj):
+            out.append(pad2)
+            _jhtml(v, indent + 1, out)
+            out.append('<span class=jp>,</span>\n' if n < len(obj) - 1 else "\n")
+        out.append(pad + '<span class=jp>]</span>')
+    elif isinstance(obj, str):
+        out.append(f'<span class=js>"{_html.escape(obj)}"</span>')
+    elif isinstance(obj, bool) or obj is None:
+        out.append(f'<span class=jb>{"null" if obj is None else str(obj).lower()}</span>')
+    else:
+        out.append(f'<span class=jn>{_html.escape(str(obj))}</span>')
+    return out
+
+
+def _json_html(data: bytes) -> str:
+    import json as _json
+    text = data.decode("utf8", "replace")
+    if len(text) > _JSON_MAX_CHARS:
+        raise ValueError("too large to format")
+    return "<pre>" + "".join(_jhtml(_json.loads(text))) + "</pre>"
+
+
+def _jsonl_html(data: bytes) -> str:
+    """One numbered, formatted record per row.
+
+    Numbered because a comment on a shard is always "record 12", and because
+    the number is the anchor that keeps the eye on the same record in both
+    panes when the rewritten side is a different length.
+    """
+    import html as _html
+    import json as _json
+    lines = data.decode("utf8", "replace").splitlines()
+    rows, n = [], 0
+    for raw in lines:
+        if not raw.strip():
+            continue
+        n += 1
+        if n > _JSONL_MAX_RECORDS:
+            break
+        try:
+            body = "".join(_jhtml(_json.loads(raw)))
+        except Exception:  # noqa: BLE001 -- a bad line is itself worth seeing
+            body = f'<span class=jbad>{_html.escape(raw)}</span>'
+        rows.append(f'<div class=rec><div class=recn>{n}</div>'
+                    f'<pre class=recb>{body}</pre></div>')
+    kept = sum(1 for r in lines if r.strip())
+    if kept > _JSONL_MAX_RECORDS:
+        rows.append(f'<p class=more>{kept - _JSONL_MAX_RECORDS} more records '
+                    f'not shown</p>')
+    return "".join(rows)
+
+
+def _xml_html(data: bytes) -> str:
+    """Indented XML. Same bargain as the JSON: both sides get one shape."""
+    import html as _html
+    import xml.dom.minidom as _md
+    text = data.decode("utf8", "replace")
+    if len(text) > _JSON_MAX_CHARS:
+        raise ValueError("too large to format")
+    pretty = _md.parseString(text).toprettyxml(indent="  ")
+    # minidom leaves a blank line wherever the input already had whitespace.
+    pretty = "\n".join(l for l in pretty.splitlines() if l.strip())
+    return f"<pre>{_html.escape(pretty)}</pre>"
 
 
 def _rows_from_csv(data: bytes):
@@ -405,6 +530,28 @@ def view(key: str, data: bytes) -> dict:
         if ext in _SLIDE_EXTS:
             return {"kind": "text",
                     "html": f"<pre>{_html.escape(_text_from_pptx(data))}</pre>"}
+        # Formatting is best-effort on purpose. A file that does not parse is
+        # still a file the reviewer has to look at -- and "the rewriter emitted
+        # broken JSON" is itself the finding -- so a failure here drops to the
+        # raw text below rather than to a card saying it could not be shown.
+        if ext in _JSONL_EXTS:
+            try:
+                return {"kind": "records", "html": _jsonl_html(data)}
+            except Exception:  # noqa: BLE001
+                pass
+        if ext in _JSON_EXTS:
+            try:
+                return {"kind": "text", "html": _json_html(data)}
+            except Exception:  # noqa: BLE001
+                pass
+        if ext in _XML_EXTS:
+            try:
+                return {"kind": "text", "html": _xml_html(data)}
+            except Exception:  # noqa: BLE001
+                pass
+        if ext in _JSON_EXTS | _JSONL_EXTS | _XML_EXTS:
+            return {"kind": "text",
+                    "html": f"<pre>{_html.escape(data.decode('utf8', 'replace'))}</pre>"}
         if ext in _TEXT_EXTS:
             return {"kind": "text",
                     "html": f"<pre>{_html.escape(data.decode('utf8', 'replace'))}</pre>"}
@@ -438,20 +585,50 @@ def session_id(left: str, right: str) -> str:
 PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Review</title><style>
 .doc{background:#fff;padding:10px 12px}
+/* A wide sheet scrolls sideways rather than squeezing 40 columns into the
+   pane. Both panes do it independently -- the sync mirrors vertical position,
+   which is the axis a reviewer moves down. */
+.doc.table{overflow-x:auto}
 /* Fixed layout, not auto. One takeout row carries a multi-kilobyte JSON blob,
    and auto layout hands that column the whole pane -- every other heading
    collapses to one letter per line and the two sides stop lining up. Fixed
    gives each column an equal share and lets the long one wrap. */
 .doc table{border-collapse:collapse;font-size:12.5px;width:100%;table-layout:fixed}
+/* break-word, not anywhere. "anywhere" split "Galih Eka Putra" across two
+   lines as "G / alih Eka Putra" -- and a person's name is the single thing a
+   reviewer is scanning these cells for. break-word keeps words whole and
+   still breaks the base64 blobs that have no break opportunity at all. */
 .doc th,.doc td{border:1px solid #e3e6ea;padding:3px 6px;text-align:left;
-  vertical-align:top;white-space:pre-wrap;overflow-wrap:anywhere}
+  vertical-align:top;white-space:pre-wrap;word-break:normal;overflow-wrap:break-word}
 .doc thead th{position:sticky;top:0;background:#f5f6f8;font-weight:600;z-index:1;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .doc th.n,.doc td.n{color:#999;text-align:right;font-variant-numeric:tabular-nums;
   background:#fafbfc;width:42px;white-space:nowrap}
 .doc pre{margin:0;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
-  white-space:pre-wrap;word-break:break-word}
+  white-space:pre-wrap;word-break:normal;overflow-wrap:break-word}
 .doc .more{color:#888;font-size:12px;padding:6px 2px}
+
+/* Formatted JSON. Keys carry the colour because a reviewer scanning for a
+   leak is scanning field names first -- emailAddress, displayName, phone --
+   and only then reading the value beside it. */
+.doc .jk{color:#1a4f8a}
+.doc .js{color:#0b6b5e}
+.doc .jn{color:#a15c00}
+.doc .jb{color:#7a3ea1}
+.doc .jp{color:#9aa0a6}
+.doc .jbad{color:var(--bad)}
+
+/* One record of a .jsonl. The number is a gutter, not content: it stays put
+   while the record beside it wraps, so the same record sits at the same mark
+   in both panes even when the rewritten side is a different length. */
+.doc.records{padding:0}
+.rec{display:flex;gap:0;border-bottom:1px solid #eef0f2;align-items:stretch}
+.rec:last-child{border-bottom:0}
+.recn{flex:0 0 44px;padding:8px 8px 8px 0;text-align:right;color:#b0b5ba;
+  background:#fafbfc;border-right:1px solid #eef0f2;font:11.5px/1.5 ui-monospace,
+  SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums;
+  position:sticky;left:0}
+.recb{flex:1;min-width:0;padding:8px 10px}
 .opt{color:var(--mut);font-weight:400;font-size:11px}
 .loc{font-weight:600;font-size:13px;padding:2px 8px;border-radius:5px;background:#eef1f5;
      color:#333;white-space:nowrap;max-width:22ch;overflow:hidden;text-overflow:ellipsis}
@@ -739,6 +916,12 @@ function start(r){
   document.title=where+" · "+(r.pairs?r.pairs.length:0)+" docs";
   if(r.hint){el("btext").textContent=r.hint.text;el("bfix").textContent="use "+r.hint.output+"/";
     el("bfix").onclick=()=>{el("out").value=r.hint.output;el("banner").classList.remove("on");open_();};
+    el("bfix").style.display=""; el("banner").classList.add("on");}
+  else if(r.scope_note){
+    // Not a warning and not something to fix -- a fact about what the chosen
+    // location covers. It carries no button, because there is nothing here
+    // the reviewer got wrong.
+    el("btext").textContent=r.scope_note; el("bfix").style.display="none";
     el("banner").classList.add("on");}
   else el("banner").classList.remove("on");
   ENT=null;OPEN=null;i=0;
@@ -834,7 +1017,7 @@ function build_pane(box,side,id,meta){
   // Rendered here rather than handed to the browser: it SAVES a csv/xlsx
   // instead of showing one. Rendering also makes them ordinary DOM, so these
   // panes scroll in step exactly like the PDF ones.
-  if(meta.kind==="table"||meta.kind==="text"){
+  if(meta.kind==="table"||meta.kind==="text"||meta.kind==="records"){
     const sc=document.createElement("div");
     sc.className="scroll doc "+meta.kind;
     sc.innerHTML=meta.html||"";
@@ -917,7 +1100,28 @@ async function panes(p){
   if(p.right) RS=build_pane(el("rp"),"right",p.id,rm);
   else el("rp").innerHTML="<div class='empty'><b>Nothing in the output for this document.</b><br>"+
         "Either the run withheld it, or it was never processed.</div>";
+  if(lm.kind==="records"&&rm.kind==="records") alignRecords(LS,RS);
   linkScroll(LS,RS);
+}
+
+/* Record N starts at the same height on both sides.
+   Proportional scroll sync is the right answer for a PDF, where the two sides
+   are the same length. It is the wrong one here: the rewriter replaces a long
+   gravatar URL with "https://example.com", so the source record is taller,
+   and by record 20 the panes are showing different records. Pad the shorter
+   of each pair instead and the numbers stay level all the way down. */
+function alignRecords(a,b){
+  if(!a||!b)return;
+  const la=[...a.querySelectorAll(".rec")], lb=[...b.querySelectorAll(".rec")];
+  const n=Math.min(la.length,lb.length);
+  // Clear first, or a re-align after a resize measures the previous padding
+  // and every record grows a little taller each time.
+  for(const r of la.concat(lb)) r.style.minHeight="";
+  requestAnimationFrame(()=>{
+    const h=[];
+    for(let i=0;i<n;i++) h.push(Math.max(la[i].offsetHeight,lb[i].offsetHeight));
+    for(let i=0;i<n;i++){ la[i].style.minHeight=h[i]+"px"; lb[i].style.minHeight=h[i]+"px"; }
+  });
 }
 
 /* ---------- details ---------- */
@@ -1187,8 +1391,47 @@ def inspect_root(root: str, profile: str | None) -> dict:
     return out
 
 
+#: Pairs kept per app folder. Nobody reviews an export end to end -- the job
+#: is a few files per app and a search for the handful somebody reported -- and
+#: a list of 121,538 is one nobody can navigate.
+PER_APP = 100
+
+
+def _thin(rows, per_app: int):
+    """At most ``per_app`` pairs per app folder, chosen at random.
+
+    Per app, not per run: a single budget spent top-down would go entirely to
+    whichever app sorts first and show none of the rest.
+
+    Random rather than the first N, because S3 hands back keys in sort order,
+    so the head of the list is always page_000001 of whoever sorts first --
+    the same corner of the same export every time, with whole categories of
+    defect never on screen.
+
+    Seeded on the app name, so the same run thins to the same files every time
+    it is opened. Verdicts in marks.json are keyed by path, and a sample that
+    reshuffled on reopen would strand yesterday's review against files nobody
+    can see today.
+    """
+    if not per_app:
+        return rows, {}
+    by_app: dict[str, list] = {}
+    for r in rows:
+        by_app.setdefault(r["label"].split("/")[0], []).append(r)
+    kept, dropped = [], {}
+    for app, group in by_app.items():
+        if len(group) <= per_app:
+            kept += group
+            continue
+        dropped[app] = len(group) - per_app
+        kept += random.Random(app).sample(group, per_app)
+    kept.sort(key=lambda r: r["label"])
+    return kept, dropped
+
+
 def open_review(root=None, left=None, right=None, profile=None,
-                source=None, output=None, ignore=None, label=None) -> dict:
+                source=None, output=None, ignore=None, label=None,
+                per_app: int = PER_APP) -> dict:
     ls, rs, filt = _sides(root, left, right, profile, source, output)
     ign = {s.strip().lower() for s in (ignore or pairing.DEFAULT_IGNORE) if s.strip()}
     ign |= {s.lower() for s in (source, output) if s}
@@ -1207,6 +1450,7 @@ def open_review(root=None, left=None, right=None, profile=None,
         rows.append({"id": len(rows), "left": lp, "right": None, "how": "missing",
                      "label": "/".join(pairing.normalise(lp, ign))})
     rows.sort(key=lambda r: r["label"])
+    rows, thinned = _thin(rows, per_app)
     for n, r in enumerate(rows):
         r["id"] = n
 
@@ -1239,6 +1483,30 @@ def open_review(root=None, left=None, right=None, profile=None,
     if idx["unmatched_right"]:
         print(f"  {len(idx['unmatched_right'])} output file(s) with no source", flush=True)
 
+    # Reported, never silent. A bucket can hold several runs' worth of export,
+    # and the documents belonging to the OTHER ones are not findings -- but
+    # "your location covers more than this run" is worth a line, and hiding
+    # rows without saying so would be worse than the noise it removes.
+    if thinned:
+        named = ", ".join(f"{a}/ ({n} more)" for a, n in
+                          sorted(thinned.items(), key=lambda t: -t[1])[:4])
+        print(f"  showing {per_app} per app — not shown: {named}", flush=True)
+
+    units = idx.get("out_of_scope_units") or {}
+    scope_note = None
+    if units:
+        ranked = sorted(units.items(), key=lambda t: -t[1])
+        total = sum(units.values())
+        # One branch is the common case and reads better without its own
+        # count repeated back at you; several need the breakdown.
+        named = ranked[0][0] + "/" if len(ranked) == 1 else \
+            ", ".join(f"{u}/ ({n})" for u, n in ranked[:3])
+        more = "" if len(ranked) <= 3 else f" and {len(ranked) - 3} more"
+        scope_note = (f"{total:,} document(s) under {named}{more} have no output at "
+                      f"all, so this run did not cover them and they are not "
+                      f"listed. Point at that location directly to review it.")
+        print(f"  {scope_note}", flush=True)
+
     # Safety net. If almost nothing paired, the split is almost certainly
     # wrong — and the reviewer has no way to tell that from a screen of
     # "nothing in the output", which looks exactly like a pipeline that
@@ -1248,8 +1516,16 @@ def open_review(root=None, left=None, right=None, profile=None,
     missing = len(idx["unmatched_left"])
     if root and rows and missing / len(rows) > 0.5:
         guess = pairing.autosplit([p for p in ls.paths if "__MACOSX" not in p])
+        # Never offer a folder that the SOURCE is made of. On the run this was
+        # written against the banner said "jira/ holds far more — that is
+        # probably the output folder", and jira/ was the source: taking the
+        # advice would have compared the run against itself. A folder every
+        # source path already sits under cannot be the other half.
+        srcseg = {seg.lower() for p in ls.docs for seg in pairing.segments(p)[:-1]}
+        outseg = {seg.lower() for p in rs.docs for seg in pairing.segments(p)[:-1]}
         better = [o for o in guess["options"]
-                  if o["name"] not in (source, output) and o["files"] > missing * 0.5]
+                  if o["name"] not in (source, output) and o["files"] > missing * 0.5
+                  and not (o["name"].lower() in srcseg and o["name"].lower() not in outseg)]
         if better:
             alt = max(better, key=lambda o: o["files"])["name"]
             hint = {"output": alt,
@@ -1264,6 +1540,8 @@ def open_review(root=None, left=None, right=None, profile=None,
 
     session = {"pairs": rows, "marks": marks, "counts": counts,
                "left": S["left"], "right": S["right"], "hint": hint,
+               "scope_note": scope_note,
+               "thinned": thinned,
                "left_short": short(ls, source), "right_short": short(rs, output),
                "source": source, "output": output, "root": root,
                # What the browser tab is named. Two tabs on two batches are
@@ -1458,18 +1736,152 @@ class Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
+def _name_for(spec: str) -> str:
+    """A short, distinguishable tab name for a location."""
+    return Path(str(spec).rstrip("/")).name or str(spec)
+
+
+def plan(a) -> list[dict]:
+    """Every review the arguments ask for, in the order they were given.
+
+    One is the ordinary case and runs in this process; more than one fans out
+    to a server each. Kept separate from ``main`` so the collecting can be
+    tested without starting anything.
+    """
+    jobs = [{"root": r, "label": a.label or _name_for(r)} for r in (a.root or [])]
+    jobs += [{"left": l, "right": r,
+              "label": a.label or f"{_name_for(l)} → {_name_for(r)}"}
+             for l, r in (a.pair or [])]
+    if a.left and a.right:
+        jobs.append({"left": a.left, "right": a.right,
+                     "label": a.label or f"{_name_for(a.left)} → {_name_for(a.right)}"})
+    return jobs
+
+
+def _fan_out(jobs, a) -> int:
+    """One review per location, each its own server, all opened at once.
+
+    Comparing runs means having them side by side, and this tool holds one
+    session per process -- the index, the marks and the render cache are all
+    per-server state. Rather than teach every one of those to be
+    multi-tenant, run one server per review and hand back the list of URLs.
+    They are independent: marks.json is already keyed by the pair of
+    locations, so three tabs cannot overwrite each other's verdicts.
+    """
+    import atexit
+    import signal
+
+    import tempfile
+
+    kids, urls, logs = [], [], []
+    for n, job in enumerate(jobs):
+        port = a.port + n
+        cmd = [sys.executable, str(Path(__file__).resolve()),
+               "--port", str(port), "--no-open"]
+        if job.get("root"):
+            cmd.append(job["root"])
+        else:
+            cmd += ["--left", job["left"], "--right", job["right"]]
+        for flag in ("profile", "source", "output"):
+            if getattr(a, flag, None):
+                cmd += [f"--{flag}", getattr(a, flag)]
+        cmd += ["--label", job["label"]]
+        # Each child's chatter goes to its own file rather than the shared
+        # terminal. Three reviews indexing at once interleaved into an
+        # unreadable braid, and the one thing a person needs from this command
+        # is a clean list of URLs. A file, not a pipe: nobody is draining
+        # these while they run, and a full pipe buffer would wedge the child.
+        log = tempfile.NamedTemporaryFile(prefix="pii-review-", suffix=".log",
+                                          delete=False)
+        kids.append(subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT))
+        logs.append(log.name)
+        urls.append((job["label"], f"http://127.0.0.1:{port}/"))
+
+    def stop(*_):
+        for k in kids:
+            if k.poll() is None:
+                k.terminate()
+        for f in logs:
+            try:
+                Path(f).unlink()
+            except OSError:
+                pass
+    atexit.register(stop)
+    signal.signal(signal.SIGTERM, lambda *_: (stop(), sys.exit(0)))
+
+    # Indexing is a network walk per review, so they are told to be quiet and
+    # the tabs open once each one actually answers. Opening first gave three
+    # connection-refused pages, which reads as "the tool is broken".
+    print(f"\n  starting {len(jobs)} reviews — this takes a moment each\n", flush=True)
+    for (label, url), kid in zip(urls, kids):
+        ready, waited = False, 0.0
+        # Wait for as long as the child is alive rather than on a clock.
+        # A fixed budget was wrong: indexing an S3 prefix is a paginated walk
+        # of every key, which took minutes on the real runs, and a two-minute
+        # cap reported "did not start" for reviews that were about to come up
+        # perfectly. The child exiting is the only honest failure signal.
+        while kid.poll() is None:
+            try:
+                urllib.request.urlopen(url, timeout=2).read(1)
+                ready = True
+                break
+            except Exception:  # noqa: BLE001 -- still indexing
+                time.sleep(1.0)
+                waited += 1.0
+                # Silence past half a minute reads as a hang, and the reason
+                # it is slow (a large bucket) is worth naming.
+                if waited % 30 == 0:
+                    print(f"    …still indexing {label}  ({int(waited)}s)",
+                          flush=True)
+        if ready:
+            print(f"    {url}   {label}", flush=True)
+            if not a.no_open:
+                webbrowser.open(url)
+        else:
+            # Silence is the wrong failure mode. Show why this one did not
+            # come up, from its own log, instead of a bare "did not start".
+            print(f"  ! {label} stopped before it was ready:", flush=True)
+            why = Path(logs[urls.index((label, url))]).read_text()[-800:].strip()
+            for line in (why or "it wrote nothing").splitlines()[-8:]:
+                print(f"      {line}", flush=True)
+    print("\n  Ctrl-C stops all of them.\n", flush=True)
+    try:
+        for k in kids:
+            k.wait()
+    except KeyboardInterrupt:
+        stop()
+        print("\nstopped. verdicts are in", MARKS, flush=True)
+    return 0
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("root", nargs="?", help="folder, .zip or s3:// prefix holding both halves")
+    ap = argparse.ArgumentParser(
+        description="Side-by-side review of a redaction run.",
+        epilog="Give several locations, or repeat --pair, to open several "
+               "reviews at once — one browser tab each, on consecutive ports.")
+    ap.add_argument("root", nargs="*",
+                    help="folder, .zip or S3 location holding both halves. "
+                         "Give more than one to open one review per location.")
+    ap.add_argument("--pair", nargs=2, action="append", metavar=("SOURCE", "OUTPUT"),
+                    help="a review whose two halves live apart. Repeatable.")
     ap.add_argument("--left", help="source, when the two halves live apart")
     ap.add_argument("--right", help="output, when the two halves live apart")
     ap.add_argument("--source", help="folder name of the source half inside root")
     ap.add_argument("--output", help="folder name of the output half inside root")
-    ap.add_argument("--profile", help="AWS profile for s3:// locations")
+    ap.add_argument("--profile", help="AWS profile for S3 locations")
     ap.add_argument("--label", help="what to call this batch in the tab title")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-open", action="store_true")
     a = ap.parse_args()
+
+    jobs = plan(a)
+    if len(jobs) > 1:
+        return _fan_out(jobs, a)
+
+    a.root = a.root[0] if a.root else None
+    if jobs and not a.root:
+        a.left, a.right = jobs[0].get("left"), jobs[0].get("right")
+    a.label = a.label or (jobs[0]["label"] if jobs else None)
 
     if a.root and not (a.source or a.output):
         guess = inspect_root(a.root, a.profile)

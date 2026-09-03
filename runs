@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# The runs we review, by short name. Add a line, get a command.
+#
+#   ./runs            list them
+#   ./runs s1         open one
+#   ./runs s1 sample  open several, one tab each
+#
+# Each entry is:  name | profile | source | output
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+S1=s3://sail-enterprise-data-private-s1
+ED=s3://sail-enterprise-data
+D0=s3://sail-export-d0-private-data
+AI=$ED/ai-lab-sample-2026
+
+RUNS=(
+  "s1      | s1   | $S1/sail-export-s1-eval-set1     | $S1/sail-export-s1-eval-set1-pii"
+  "sample  | s1   | $S1/sail-export-s1-eval-sample   | $S1/sail-export-s1-eval-sample-pii"
+  "canary  | s1   | $S1/sail-export-s1-canary5       | $S1/sail-export-s1-canary5-pii"
+  "l1      | s1   | $S1/sail-export-l1               | $S1/sail-export-l1-pii"
+  "i1      | rest | $AI/i1                          | $AI/i1-pii-r3"
+  "v1      | rest | $AI/v1                          | $AI/v1-pii-r3"
+  "v2      | rest | $AI/v2                          | $AI/v2-pii-r3"
+  "i1-r2   | rest | $AI/i1                          | $AI/i1-pii-r2"
+  "v1-r2   | rest | $AI/v1                          | $AI/v1-pii-r2"
+  "v2-r2   | rest | $AI/v2                          | $AI/v2-pii-r2"
+  "export  | sail | $D0/my-export-2026               | $D0/my-export-2026-pii"
+)
+
+row() { for r in "${RUNS[@]}"; do [ "$(echo "$r" | cut -d'|' -f1 | xargs)" = "$1" ] && echo "$r" && return; done; return 1; }
+
+if [ $# -eq 0 ]; then
+  printf "\n  %-9s %-6s %s\n" NAME PROFILE SOURCE
+  for r in "${RUNS[@]}"; do
+    printf "  %-9s %-6s %s\n" "$(echo "$r"|cut -d'|' -f1|xargs)" "$(echo "$r"|cut -d'|' -f2|xargs)" "$(echo "$r"|cut -d'|' -f3|xargs)"
+  done
+  printf "\n  ./runs s1 sample     opens those two, a tab each\n\n"
+  exit 0
+fi
+
+ARGS=(); PROFILE=""
+for name in "$@"; do
+  r="$(row "$name")" || { echo "  no run called '$name' — ./runs to list them"; exit 1; }
+  PROFILE="$(echo "$r" | cut -d'|' -f2 | xargs)"
+  ARGS+=(--pair "$(echo "$r" | cut -d'|' -f3 | xargs)" "$(echo "$r" | cut -d'|' -f4 | xargs)")
+done
+exec python3 "$HERE/review.py" "${ARGS[@]}" --profile "$PROFILE"
