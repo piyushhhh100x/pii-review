@@ -646,6 +646,64 @@ def read_mappings(spec: str, profile: str | None = None, store=None,
 
 _MAP_CACHE: dict[str, str] = {}
 
+#: Comments left on a mapping. Separate from marks.json on purpose: that file
+#: is verdicts on DOCUMENTS, and a note about a substitution belongs to the
+#: run's mapping table, which several document reviews share.
+NOTES = HERE / "map_notes.json"
+
+#: Rows of one attribute type on screen before "show more". Small, because the
+#: point of grouping by type is to see the SHAPE of what the run did -- twelve
+#: thousand emails all look alike after the first handful, and the types with
+#: three rows are the interesting ones.
+PER_TYPE = 8
+
+
+def map_key(row: dict) -> str:
+    """Stable id for one mapping, independent of its rowid.
+
+    Not the primary key: a re-run renumbers those, and a comment that came
+    loose from its mapping is worse than no comment.
+    """
+    # Hashed rather than "type\x00original": the raw pair carries a NUL and
+    # whatever punctuation the original had, which survives JSON but makes
+    # every log line, URL and shell test a small argument about quoting.
+    raw = f"{row.get('attribute_type') or '?'}\x00{row.get('original')}"
+    return hashlib.sha1(raw.encode("utf8", "replace")).hexdigest()[:16]
+
+
+def grouped_mappings(rows, salt: str, per_type: int, opened: dict,
+                     look: str = "") -> list:
+    """Mappings by attribute type, sampled within each, paginated per type.
+
+    Grouped because a flat list ordered by type is a screen of ``aadhaar`` and
+    nothing else -- 116,782 rows begin with one type and never reach the rest.
+    Every type is on screen from the first paint, which is the only way to see
+    what the run actually did.
+
+    Sampled within a type rather than taking the head, for the same reason the
+    document list is: the first eight emails alphabetically are eight
+    variations of the same thing. Seeded, so "show more" extends the list
+    instead of reshuffling it under the cursor.
+    """
+    by_type: dict[str, list] = {}
+    for r in rows:
+        if look:
+            hay = " ".join(str(r.get(f) or "") for f in
+                           ("original", "replacement", "attribute_type")).lower()
+            if look not in hay:
+                continue
+        by_type.setdefault(str(r.get("attribute_type") or "?"), []).append(r)
+
+    out = []
+    for kind in sorted(by_type):
+        group = by_type[kind]
+        order = list(group)
+        random.Random(f"{salt}\x00{kind}").shuffle(order)
+        want = opened.get(kind, per_type)
+        out.append({"type": kind, "total": len(group),
+                    "rows": order[:want], "shown": min(want, len(group))})
+    return out
+
 
 def session_id(left: str, right: str) -> str:
     """Stable id for a (left, right) pair, so verdicts survive a re-open."""
@@ -785,13 +843,26 @@ header{border-bottom:1px solid var(--line);padding:7px 12px;display:flex;gap:10p
   padding:5px 8px;border:1px solid var(--line);border-radius:6px}
 #mbody{overflow:auto;padding:0 14px 14px}
 #mbody table{border-collapse:collapse;width:100%;font-size:12.5px;table-layout:fixed}
-#mbody th{position:sticky;top:0;background:#f5f6f8;text-align:left;font-weight:600;
-  padding:6px;border-bottom:1px solid var(--line);z-index:1}
 #mbody td{padding:4px 6px;border-bottom:1px solid #f0f2f4;vertical-align:top;
-  word-break:normal;overflow-wrap:break-word}
-#mbody td.o{color:var(--bad)}
+  word-break:normal;overflow-wrap:break-word;
+  font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+#mbody td.o{color:var(--bad);width:42%}
 #mbody td.r{color:var(--ok)}
-#mbody td.t{color:var(--mut);white-space:nowrap;width:15%}
+#mbody td.cmt{width:88px;text-align:right;white-space:nowrap}
+/* One section per attribute type, its heading sticky, so scrolling through
+   twelve thousand emails never loses which type you are in. */
+.mgrp{margin:0 0 18px}
+.mgrp h4{position:sticky;top:0;background:#fff;margin:0;padding:9px 0 5px;
+  font-size:12px;text-transform:uppercase;letter-spacing:.04em;z-index:2;
+  border-bottom:1px solid var(--line);display:flex;justify-content:space-between}
+.mgrp h4 .opt{text-transform:none;letter-spacing:0}
+.lnk{border:0;background:none;color:var(--mut);cursor:pointer;font:inherit;
+  padding:2px 4px;border-radius:4px}
+.lnk:hover{color:var(--fg);background:var(--soft)}
+.mmore{margin:6px 0 0;font-size:12px;text-decoration:underline}
+.mnotes{margin-top:3px;display:flex;flex-wrap:wrap;gap:4px}
+.mnote{background:#fff8e6;border:1px solid #f0e2bd;color:#6b5a2a;border-radius:4px;
+  padding:1px 6px;font:11.5px/1.5 ui-sans-serif,-apple-system,sans-serif}
 #info{display:none;border-left:1px solid var(--line);background:#fcfcfd;overflow:auto;min-height:0;padding:12px 13px 26px}
 #body.info #info{display:block}
 #info h3{font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--mut);
@@ -1420,23 +1491,55 @@ function maps(){
   if(!HASMAP){alert("No mapping database for this run.\n\nPoint at one with --mappings /path/to/pii_mappings.db");return;}
   el("mveil").classList.add("on"); el("mq").focus(); loadMaps();
 }
+let OPENED={};                 // attribute type -> how many rows expanded to
 async function loadMaps(){
   const q=el("mq").value.trim();
   const seq=++MSEQ;
-  const r=await(await fetch("/api/mappings?q="+encodeURIComponent(q))).json();
+  const open=Object.entries(OPENED).map(([k,v])=>k+":"+v).join(",");
+  const r=await(await fetch("/api/mappings?q="+encodeURIComponent(q)+
+                            "&open="+encodeURIComponent(open))).json();
   if(seq!==MSEQ)return;
   if(r.error){el("mbody").innerHTML=`<p class="more">${esc(r.error)}</p>`;
     el("mcount").textContent=""; return;}
-  el("mcount").textContent = q ? `${r.matched} of ${r.count}` : `${r.count} mappings`;
-  const rows=r.shown.map(m=>`<tr><td class=t>${esc(m.attribute_type||"?")}</td>`+
-    `<td class=o>${esc(m.original==null?"":String(m.original))}</td>`+
-    `<td class=r>${m.replacement==null?"<i>not replaced</i>":esc(String(m.replacement))}</td></tr>`).join("");
-  el("mbody").innerHTML = rows
-    ? `<table><thead><tr><th>type</th><th>original</th><th>replacement</th></tr></thead><tbody>${rows}</tbody></table>`
-      + (r.matched>r.shown.length?`<p class="more">${r.matched-r.shown.length} more — narrow the search</p>`:"")
-    : `<p class="more">Nothing matches “${esc(q)}”.</p>`;
+  el("mcount").textContent = q ? `${r.matched} of ${r.count} match` : `${r.count} mappings`;
+  if(!r.groups.length){
+    el("mbody").innerHTML=`<p class="more">Nothing matches &ldquo;${esc(q)}&rdquo;.</p>`;return;}
+  el("mbody").innerHTML = r.groups.map(g=>{
+    const rows=g.rows.map(m=>{
+      const notes=(m.notes||[]).map(n=>`<span class=mnote>${esc(n)}</span>`).join("");
+      return `<tr data-key="${esc(m.key)}">`+
+        `<td class=o>${esc(m.original==null?"":String(m.original))}</td>`+
+        `<td class=r>${m.replacement==null?"<i>not replaced</i>":esc(String(m.replacement))}`+
+          (notes?`<div class=mnotes>${notes}</div>`:"")+`</td>`+
+        `<td class=cmt><button class="lnk addn" title="comment on this mapping">`+
+          ((m.notes||[]).length?`&#9679; ${(m.notes||[]).length}`:"comment")+`</button></td></tr>`;
+    }).join("");
+    // Every type on screen from the first paint. A flat list ordered by type
+    // is a screen of "aadhaar" and never reaches the rest.
+    const left=g.total-g.shown;
+    return `<section class=mgrp><h4>${esc(g.type)}<span class=opt>${g.shown} of ${g.total}</span></h4>`+
+      `<table><tbody>${rows}</tbody></table>`+
+      (left>0?`<button class="lnk mmore" data-t="${esc(g.type)}" data-n="${g.shown}">`+
+              `show ${Math.min(left,25)} more of ${left}</button>`:"")+
+      `</section>`;
+  }).join("");
 }
-el("mq").addEventListener("input",()=>{clearTimeout(MAPQ);MAPQ=setTimeout(loadMaps,180);});
+
+el("mbody").addEventListener("click",async e=>{
+  const more=e.target.closest(".mmore");
+  if(more){ OPENED[more.dataset.t]=parseInt(more.dataset.n,10)+25; loadMaps(); return; }
+  const add=e.target.closest(".addn");
+  if(!add)return;
+  const key=add.closest("tr").dataset.key;
+  const text=prompt("Comment on this mapping");
+  if(text===null)return;
+  await fetch("/api/mapnote",{method:"POST",
+    body:JSON.stringify({key,text})});
+  loadMaps();
+});
+el("mq").addEventListener("input",()=>{clearTimeout(MAPQ);
+  OPENED={};   // a filtered list is a different list; carrying offsets over it
+  MAPQ=setTimeout(loadMaps,180);});
 el("mx").onclick=()=>el("mveil").classList.remove("on");
 el("mveil").onclick=e=>{if(e.target.id==="mveil")el("mveil").classList.remove("on");};
 
@@ -1688,7 +1791,8 @@ def open_review(root=None, left=None, right=None, profile=None,
 
     with _LOCK:
         S.update(ready=True, rows=rows, left_store=ls, right_store=rs,
-                 profile=profile, map_spec=map_spec, map_store=map_store,
+                 profile=profile, sample_salt=salt,
+                 map_spec=map_spec, map_store=map_store,
                  map_inner=map_inner,
                  sid=sid, all_marks=all_marks, marks=marks,
                  left=f"{ls}{'/' + source if source else ''}",
@@ -1854,18 +1958,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001 -- shown in the panel
                 return self._json({"error": f"{type(exc).__name__}: {exc}"[:200]})
             look = (q.get("q") or [""])[0].strip().lower()
-            rows = out["rows"]
-            if look:
-                rows = [r for r in rows
-                        if look in str(r.get("original", "")).lower()
-                        or look in str(r.get("replacement", "")).lower()
-                        or look in str(r.get("attribute_type", "")).lower()]
-            # Capped like everything else here: 30,000 rows of substitution is
-            # not something anyone reads, and the search is how you use it.
+            # "email:40,name:16" -- how far each type has been expanded. Sent
+            # by the page rather than held here, so two tabs on one run do not
+            # fight over one server-side scroll position.
+            opened = {}
+            for bit in (q.get("open") or [""])[0].split(","):
+                kind, _, n = bit.partition(":")
+                if kind and n.isdigit():
+                    opened[kind] = min(int(n), 2000)
+            groups = grouped_mappings(out["rows"], S.get("sample_salt", ""),
+                                      PER_TYPE, opened, look)
+            notes = _read_json(NOTES, {}).get(out["path"], {})
+            for g in groups:
+                for r in g["rows"]:
+                    r["key"] = map_key(r)
+                    r["notes"] = notes.get(r["key"], [])
             return self._json({"path": out["path"], "count": out["count"],
-                               "shown": rows[:400], "matched": len(rows),
-                               "types": sorted({str(r.get("attribute_type") or "?")
-                                                for r in out["rows"]})})
+                               "groups": groups,
+                               "matched": sum(g["total"] for g in groups)})
         if path.startswith("/api/metrics/"):
             try:
                 return self._json(metrics(path.rsplit("/", 1)[1]))
@@ -1971,6 +2081,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 ))
             except Exception as exc:  # noqa: BLE001 -- surfaced in the popup
                 return self._json({"error": f"{type(exc).__name__}: {exc}"})
+        if path == "/api/mapnote":
+            key, text = body.get("key"), (body.get("text") or "").strip()
+            src = S.get("map_spec")
+            if not (src and key):
+                return self._json({"error": "no mapping"}, 400)
+            with _LOCK:
+                all_notes = _read_json(NOTES, {})
+                per = all_notes.setdefault(src, {})
+                got = per.setdefault(key, [])
+                if text:
+                    got.append(text)
+                elif got:
+                    # An empty body removes the last one, which is the whole
+                    # of "undo" here. No editing, no history -- a comment on a
+                    # substitution is a note to a colleague, not a record.
+                    got.pop()
+                if not got:
+                    per.pop(key, None)
+                _write_json(NOTES, all_notes)
+            return self._json({"notes": got})
         if path == "/api/mark":
             if not S.get("ready"):
                 return self._json({"error": "no session"}, 409)

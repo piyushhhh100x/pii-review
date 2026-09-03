@@ -196,6 +196,77 @@ class AlignBySize(unittest.TestCase):
         self.assertEqual(len(idx["pairs"]), 1)
 
 
+class MappingPanel(unittest.TestCase):
+    """Grouped by type, sampled inside each, paginated per type."""
+
+    def rows(self, spec):
+        out = []
+        for kind, n in spec.items():
+            out += [{"attribute_type": kind, "original": f"{kind}-{i:04}",
+                     "replacement": f"fake-{i}"} for i in range(n)]
+        return out
+
+    def test_every_type_is_on_screen_from_the_first_paint(self):
+        # A flat list ordered by type is a screen of "aadhaar" and never
+        # reaches the rest -- 51,997 emails would bury 22 aadhaars.
+        g = review.grouped_mappings(self.rows({"aadhaar": 22, "email": 51997}),
+                                    "s", 8, {})
+        self.assertEqual([x["type"] for x in g], ["aadhaar", "email"])
+        self.assertEqual([x["shown"] for x in g], [8, 8])
+        self.assertEqual([x["total"] for x in g], [22, 51997])
+
+    def test_a_type_smaller_than_the_page_is_not_padded(self):
+        g = review.grouped_mappings(self.rows({"ifsc": 3}), "s", 8, {})
+        self.assertEqual(g[0]["shown"], 3)
+
+    def test_show_more_extends_one_type_only(self):
+        g = review.grouped_mappings(self.rows({"email": 500, "ifsc": 500}),
+                                    "s", 8, {"email": 33})
+        got = {x["type"]: x["shown"] for x in g}
+        self.assertEqual(got, {"email": 33, "ifsc": 8})
+
+    def test_show_more_extends_rather_than_reshuffles(self):
+        rows = self.rows({"email": 500})
+        first = review.grouped_mappings(rows, "s", 8, {})[0]["rows"]
+        more = review.grouped_mappings(rows, "s", 8, {"email": 33})[0]["rows"]
+        self.assertEqual([r["original"] for r in first],
+                         [r["original"] for r in more[:8]])
+
+    def test_it_samples_rather_than_taking_the_head(self):
+        rows = self.rows({"email": 500})
+        got = review.grouped_mappings(rows, "s", 8, {})[0]["rows"]
+        self.assertNotEqual([r["original"] for r in got],
+                            [r["original"] for r in rows[:8]])
+
+    def test_two_reviewers_see_different_mappings(self):
+        rows = self.rows({"email": 500})
+        a = review.grouped_mappings(rows, "laptop-A", 8, {})[0]["rows"]
+        b = review.grouped_mappings(rows, "laptop-B", 8, {})[0]["rows"]
+        self.assertNotEqual([r["original"] for r in a], [r["original"] for r in b])
+
+    def test_search_spans_every_type(self):
+        rows = self.rows({"email": 10, "ifsc": 10})
+        g = review.grouped_mappings(rows, "s", 8, {}, look="-0003")
+        self.assertEqual(sorted(x["type"] for x in g), ["email", "ifsc"])
+        self.assertEqual([x["total"] for x in g], [1, 1])
+
+    def test_search_matches_the_replacement_too(self):
+        rows = [{"attribute_type": "email", "original": "a@b.com",
+                 "replacement": "zzz@q.com"}]
+        self.assertEqual(len(review.grouped_mappings(rows, "s", 8, {}, "zzz")), 1)
+
+    def test_a_key_survives_punctuation_and_a_rerun(self):
+        # Hashed, not "type\x00original": the raw pair carries a NUL and
+        # whatever the original had in it. And not the rowid, which a re-run
+        # renumbers -- a comment adrift from its mapping is worse than none.
+        a = review.map_key({"attribute_type": "email", "original": "x'\"@b.com"})
+        b = review.map_key({"attribute_type": "email", "original": "x'\"@b.com"})
+        self.assertEqual(a, b)
+        self.assertTrue(a.isalnum())
+        self.assertNotEqual(a, review.map_key(
+            {"attribute_type": "full_name", "original": "x'\"@b.com"}))
+
+
 class PerReviewerSample(unittest.TestCase):
     """Two people on one run should not spend the day on the same hundred."""
 
