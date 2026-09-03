@@ -736,6 +736,12 @@ button{font:inherit}
 #banner .x{margin-left:auto;cursor:pointer;opacity:.6;font-size:16px}
 
 header{border-bottom:1px solid var(--line);padding:7px 12px;display:flex;gap:10px;align-items:center;flex:0 0 auto}
+/* Hidden rather than disabled when the run shipped no mapping database. A
+   button that does nothing is worse than no button: it reads as broken.
+   Shown by script, not by a descendant rule -- the header sits OUTSIDE
+   #body, so keying off a class on #body left it hidden always. */
+#mapbtn{display:none;font:600 11px/1 ui-sans-serif,-apple-system,sans-serif;
+  letter-spacing:.02em;text-transform:uppercase;padding:5px 9px}
 .icobtn{border:1px solid var(--line);background:#fff;border-radius:6px;cursor:pointer;padding:4px 7px;color:var(--mut);line-height:1;display:flex;align-items:center}
 .icobtn:hover{color:var(--fg);border-color:var(--mut)}
 .pos{font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap;font-size:13px}
@@ -833,6 +839,8 @@ h2.r{color:var(--ok)}
 .empty .why{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;opacity:.8}
 .empty .raw{display:inline-block;margin-top:10px;color:var(--fg);text-decoration:underline}
 
+.clik{cursor:pointer}
+.clik:hover{color:var(--fg)}
 footer{border-top:1px solid var(--line);padding:6px 12px;font-size:11.5px;color:var(--mut);
  display:flex;gap:14px;align-items:center;flex-wrap:wrap;flex:0 0 auto}
 kbd{font:11px ui-monospace,Menlo,monospace;background:var(--soft);border:1px solid var(--line);
@@ -877,6 +885,7 @@ kbd{font:11px ui-monospace,Menlo,monospace;background:var(--soft);border:1px sol
   <button id="rev"><span id="revic"></span><span id="revtx">Review</span></button>
   <input id="cbox" placeholder="add a comment…" spellcheck="false">
   <span class="count" id="count"></span>
+  <button class="icobtn" id="mapbtn" title="the run&#39;s PII mapping table  (m)">PII-mappings</button>
   <button class="icobtn" id="infobtn" title="details  (i)">i</button>
   <span id="split" title="change what is compared"></span>
 </header>
@@ -894,7 +903,7 @@ kbd{font:11px ui-monospace,Menlo,monospace;background:var(--soft);border:1px sol
   <aside id="info"></aside>
 </div>
 <div id="mveil"><div id="mbox">
-  <div class="mhead"><b>Mappings</b><span id="mcount" class="opt"></span>
+  <div class="mhead"><b>PII-mappings</b><span id="mcount" class="opt"></span>
     <input id="mq" placeholder="search original, replacement or type" spellcheck="false">
     <span class="x" id="mx">&times;</span></div>
   <div id="mbody"></div>
@@ -903,7 +912,7 @@ kbd{font:11px ui-monospace,Menlo,monospace;background:var(--soft);border:1px sol
   <span><kbd>enter</kbd> review + next · <kbd>r</kbd> review · <kbd>c</kbd> comment</span>
   <span><kbd>&uarr;</kbd><kbd>&darr;</kbd> file · <kbd>&larr;</kbd><kbd>&rarr;</kbd> folder · <kbd>[</kbd><kbd>]</kbd> page</span>
   <span><kbd>a</kbd> <span id="mode">unreviewed only</span></span>
-  <span><kbd>m</kbd> mappings</span>
+  <span id="mapfoot" class="clik"><kbd>m</kbd> PII-mappings</span>
   <span><kbd>s</kbd> list · <kbd>i</kbd> details · <kbd>y</kbd> <span id="syn">sync on</span> · <kbd>?</kbd> keys</span>
   <input id="jump" placeholder="jump # or name">
 </footer>
@@ -1013,6 +1022,8 @@ function start(r){
   THIN=r.thinned||{};
   TOTB=(r.pairs||[]).reduce((a,p)=>a+(p.lb||0),0);
   HASMAP=!!r.has_map;
+  el("mapbtn").style.display=HASMAP?"flex":"none";
+  el("mapfoot").style.display=HASMAP?"":"none";
   if(r.hint){el("btext").textContent=r.hint.text;el("bfix").textContent="use "+r.hint.output+"/";
     el("bfix").onclick=()=>{el("out").value=r.hint.output;el("banner").classList.remove("on");open_();};
     el("bfix").style.display=""; el("banner").classList.add("on");}
@@ -1308,6 +1319,8 @@ function toggleInfo(force){
   details();
 }
 el("infobtn").onclick=()=>toggleInfo();
+el("mapbtn").onclick=()=>maps();
+el("mapfoot").onclick=()=>maps();
 
 /* ---------- render ---------- */
 function counters(){
