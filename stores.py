@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import functools
 import io
+import re
 import subprocess
 import threading
+import urllib.parse
 import zipfile
 from collections import OrderedDict
 from pathlib import Path
@@ -173,6 +175,105 @@ class ZipStore(Store):
         return self._sizes.get(path, 0)
 
 
+#: The host forms AWS actually serves a bucket under. Virtual-hosted puts the
+#: bucket in the host (``bucket.s3.ap-south-1.amazonaws.com``); path-style puts
+#: it first in the path (``s3.ap-south-1.amazonaws.com/bucket/key``). Both
+#: spell the region with a dot or, on older links, a dash.
+_S3_VHOST = re.compile(
+    r"^(?P<bucket>[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9])"
+    r"\.s3(?:[.-](?:dualstack\.)?(?P<region>[a-z]{2}-[a-z]+-\d))?"
+    r"\.amazonaws\.com(?:\.cn)?$")
+_S3_PATH = re.compile(
+    r"^s3(?:[.-](?:dualstack\.)?(?P<region>[a-z]{2}-[a-z]+-\d))?"
+    r"\.amazonaws\.com(?:\.cn)?$")
+#: The global console host (``s3.console...``), the per-region one it now
+#: redirects to (``ap-south-1.console...``), and the bare form.
+_S3_CONSOLE = re.compile(
+    r"^(?:(?P<region>[a-z]{2}-[a-z]+-\d)\.|s3\.)?console\.aws\.amazon\.com$")
+_S3_ARN = re.compile(r"^arn:aws[a-z\-]*:s3:[a-z0-9\-]*:[0-9]*:(?P<rest>.+)$")
+
+
+def parse_s3(spec: str):
+    """``(s3://bucket/prefix, region)`` for anything that names an S3 location.
+
+    ``None`` when it names something else, so the caller can go on to try a
+    folder or a zip.
+
+    Nobody types ``s3://``. What a person has in their clipboard is whatever
+    the console put in the address bar, and that is one of five shapes -- the
+    console URL, the two REST endpoints, an ARN off an IAM policy, or the
+    ``s3://`` URI the CLI prints. Rejecting four of the five with "not a
+    folder, a .zip, or an s3:// URI" made the tool look broken at the exact
+    moment a reviewer had the right location in hand.
+
+    The region comes back because a console URL carries the one fact a profile
+    often lacks. These buckets are ap-south-1 and the SSO profile sets no
+    default region; a client built without one answers a cross-region bucket
+    with PermanentRedirect, which surfaces as an empty file list rather than
+    as an error about regions.
+    """
+    spec = (spec or "").strip().strip("\u200b")
+    if not spec:
+        return None
+
+    if spec.startswith("s3://"):
+        return _s3_uri(spec[5:]), None
+
+    m = _S3_ARN.match(spec)
+    if m:
+        # arn:aws:s3:::bucket/prefix -- account and region are empty for S3.
+        return _s3_uri(m.group("rest")), None
+
+    if not spec.startswith(("http://", "https://")):
+        return None
+
+    u = urllib.parse.urlparse(spec)
+    host = u.netloc.split("@")[-1].split(":")[0].lower()
+    qs = urllib.parse.parse_qs(u.query)
+    region = (qs.get("region") or [None])[0]
+
+    m = _S3_CONSOLE.match(host)
+    if m:
+        # /s3/buckets/<bucket> for a folder, /s3/object/<bucket> for a file.
+        # Either way the part of the location the user is looking at is in
+        # ?prefix=, percent-encoded, and the path holds only the bucket.
+        bits = [b for b in u.path.split("/") if b]
+        if len(bits) < 3 or bits[0] != "s3" or bits[1] not in ("buckets", "object"):
+            return None
+        bucket = urllib.parse.unquote(bits[2])
+        prefix = urllib.parse.unquote((qs.get("prefix") or [""])[0])
+        if bits[1] == "object":
+            # An object URL names one file. The path says so, so this is not a
+            # guess: back up to the folder holding it, which is the thing a
+            # reviewer looking at that file actually wants opened.
+            prefix = prefix.rsplit("/", 1)[0] if "/" in prefix else ""
+        return _s3_uri(f"{bucket}/{prefix}"), region or m.group("region")
+
+    m = _S3_VHOST.match(host)
+    if m:
+        key = urllib.parse.unquote(u.path)
+        return _s3_uri(f"{m.group('bucket')}/{key}"), region or m.group("region")
+
+    m = _S3_PATH.match(host)
+    if m:
+        rest = urllib.parse.unquote(u.path)
+        if not rest.strip("/"):
+            return None
+        return _s3_uri(rest), region or m.group("region")
+
+    return None
+
+
+def _s3_uri(rest: str) -> str:
+    """``bucket/a//b/`` -> ``s3://bucket/a/b``. Collapses the empty segments a
+    hand-pasted prefix picks up, and drops the trailing slash the console
+    always appends -- the two spellings are the same prefix, and leaving both
+    in circulation gives one run two entries in the recents list and two
+    unrelated sets of verdicts in marks.json."""
+    parts = [p for p in rest.split("/") if p]
+    return "s3://" + "/".join(parts)
+
+
 class S3Store(Store):
     """An S3 prefix. Uses boto3 when importable, else the aws CLI.
 
@@ -182,11 +283,16 @@ class S3Store(Store):
 
     kind = "s3"
 
-    def __init__(self, spec: str, profile: str | None = None):
+    def __init__(self, spec: str, profile: str | None = None,
+                 region: str | None = None):
+        uri = parse_s3(spec)
+        spec = uri[0] if uri else spec
+        region = region or (uri[1] if uri else None)
         super().__init__(spec)
         rest = spec[len("s3://"):].strip("/")
         self.bucket, _, self.prefix = rest.partition("/")
         self.profile = profile or None
+        self.region = region or None
         self._client = None
         self._size_map: dict[str, int] = {}
         try:
@@ -194,12 +300,13 @@ class S3Store(Store):
 
             session = boto3.Session(profile_name=self.profile) if self.profile \
                 else boto3.Session()
-            self._client = session.client("s3")
+            self._client = session.client("s3", region_name=self.region)
         except Exception:  # noqa: BLE001 -- fall back to the CLI
             self._client = None
 
     def _aws(self, *args: str) -> bytes:
-        cmd = ["aws"] + (["--profile", self.profile] if self.profile else []) + list(args)
+        cmd = ["aws"] + (["--profile", self.profile] if self.profile else []) \
+            + (["--region", self.region] if self.region else []) + list(args)
         done = subprocess.run(cmd, capture_output=True)
         if done.returncode != 0:
             raise RuntimeError(done.stderr.decode()[:400] or "aws failed")
@@ -248,9 +355,10 @@ def open_store(spec: str, profile: str | None = None) -> Store:
     """Pick a backend from the shape of ``spec``. Raises with a usable message."""
     spec = (spec or "").strip()
     if not spec:
-        raise ValueError("give a folder, a .zip, or an s3:// URI")
-    if spec.startswith("s3://"):
-        return S3Store(spec, profile)
+        raise ValueError("give a folder, a .zip, or an S3 location")
+    s3 = parse_s3(spec)
+    if s3:
+        return S3Store(s3[0], profile, s3[1])
     p = Path(spec).expanduser()
     if p.is_dir():
         return DirStore(str(p))
@@ -258,4 +366,4 @@ def open_store(spec: str, profile: str | None = None) -> Store:
         return ZipStore(str(p))
     if not p.exists():
         raise FileNotFoundError(f"no such folder or file: {spec}")
-    raise ValueError(f"not a folder, a .zip, or an s3:// URI: {spec}")
+    raise ValueError(f"not a folder, a .zip, or an S3 location: {spec}")

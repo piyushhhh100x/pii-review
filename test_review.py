@@ -49,6 +49,103 @@ class Docs(unittest.TestCase):
         self.assertFalse(stores.is_doc("a/pii_mappings.db"))
 
 
+class S3Urls(unittest.TestCase):
+    """Every shape an S3 location arrives in must open.
+
+    Nobody types ``s3://``. What is in the clipboard is whatever the console
+    put in the address bar, and every one of these used to be rejected as
+    "not a folder, a .zip, or an s3:// URI".
+    """
+
+    BUCKET = "test-pii-t2-nexus-saild1-1"
+
+    def test_the_console_url_for_a_folder(self):
+        u = (f"https://s3.console.aws.amazon.com/s3/buckets/{self.BUCKET}"
+             "?region=ap-south-1&prefix=_pii/output/&bucketType=general")
+        self.assertEqual(stores.parse_s3(u),
+                         (f"s3://{self.BUCKET}/_pii/output", "ap-south-1"))
+
+    def test_the_per_region_console_host(self):
+        u = (f"https://ap-south-1.console.aws.amazon.com/s3/buckets/{self.BUCKET}"
+             "?region=ap-south-1&prefix=_pii%2Foutput%2F")
+        self.assertEqual(stores.parse_s3(u),
+                         (f"s3://{self.BUCKET}/_pii/output", "ap-south-1"))
+
+    def test_a_console_object_url_opens_its_folder(self):
+        # Points at one file. The /object/ path segment says so, so backing up
+        # to the containing folder is a fact, not a guess.
+        u = (f"https://s3.console.aws.amazon.com/s3/object/{self.BUCKET}"
+             "?region=ap-south-1&prefix=_pii/output/a/page_1.jsonl")
+        self.assertEqual(stores.parse_s3(u),
+                         (f"s3://{self.BUCKET}/_pii/output/a", "ap-south-1"))
+
+    def test_the_virtual_hosted_endpoint(self):
+        u = f"https://{self.BUCKET}.s3.ap-south-1.amazonaws.com/_pii/output/"
+        self.assertEqual(stores.parse_s3(u),
+                         (f"s3://{self.BUCKET}/_pii/output", "ap-south-1"))
+
+    def test_the_path_style_endpoint(self):
+        u = f"https://s3.ap-south-1.amazonaws.com/{self.BUCKET}/_pii/output/"
+        self.assertEqual(stores.parse_s3(u),
+                         (f"s3://{self.BUCKET}/_pii/output", "ap-south-1"))
+
+    def test_the_regionless_endpoint_has_no_region(self):
+        u = f"https://{self.BUCKET}.s3.amazonaws.com/_pii/output"
+        self.assertEqual(stores.parse_s3(u), (f"s3://{self.BUCKET}/_pii/output", None))
+
+    def test_an_arn(self):
+        u = f"arn:aws:s3:::{self.BUCKET}/_pii/output"
+        self.assertEqual(stores.parse_s3(u), (f"s3://{self.BUCKET}/_pii/output", None))
+
+    def test_a_plain_uri_still_works_and_loses_its_trailing_slash(self):
+        # Both spellings must land on ONE string, or one run gets two recents
+        # entries and two unrelated sets of verdicts in marks.json.
+        a = stores.parse_s3(f"s3://{self.BUCKET}/_pii/output/")
+        b = stores.parse_s3(f"s3://{self.BUCKET}/_pii/output")
+        self.assertEqual(a, b)
+        self.assertEqual(a[0], f"s3://{self.BUCKET}/_pii/output")
+
+    def test_a_bucket_with_dots_is_not_read_as_an_endpoint(self):
+        u = "https://my.data.bucket.s3.eu-west-1.amazonaws.com/x/y"
+        self.assertEqual(stores.parse_s3(u), ("s3://my.data.bucket/x/y", "eu-west-1"))
+
+    def test_things_that_are_not_s3(self):
+        for spec in ("~/Desktop/pii-demo", "/tmp/export.zip",
+                     "https://example.com/s3/buckets/x", "", "   "):
+            self.assertIsNone(stores.parse_s3(spec), spec)
+
+
+class RunRoot(unittest.TestCase):
+    """A location pasted while looking at the result points at the output half.
+
+    Opened literally that is a review whose left pane is empty on every row,
+    which reads as "the pipeline dropped everything" rather than "you pointed
+    one level too deep".
+    """
+
+    def test_the_pipeline_output_prefix_is_climbed_out_of(self):
+        for spec in ("s3://b/run1/_pii/output", "s3://b/run1/_pii/output/",
+                     "s3://b/run1/_pii", "/x/run1/_pii/output"):
+            self.assertIn(pairing.run_root(spec), ("s3://b/run1", "/x/run1"), spec)
+
+    def test_a_run_root_is_left_alone(self):
+        for spec in ("s3://b/run1", "s3://b", "/x/y", "s3://b/output"):
+            self.assertEqual(pairing.run_root(spec), spec, spec)
+
+    def test_it_never_climbs_past_the_bucket(self):
+        self.assertEqual(pairing.run_root("s3://_pii/output"), "s3://_pii/output")
+
+    def test_a_console_url_is_canonicalised_before_it_is_climbed(self):
+        # The URL's depth lives in ?prefix=, not in its path. Climbing first
+        # silently did nothing and the review opened on the output half alone.
+        u = ("https://s3.console.aws.amazon.com/s3/buckets/bk"
+             "?region=ap-south-1&prefix=_pii/output/")
+        self.assertEqual(review.resolve_root(u), "s3://bk")
+
+    def test_a_local_folder_is_untouched(self):
+        self.assertEqual(review.resolve_root("~/Desktop/pii-demo"), "~/Desktop/pii-demo")
+
+
 class Viewing(unittest.TestCase):
     """view() must never hand a document to the browser to save.
 

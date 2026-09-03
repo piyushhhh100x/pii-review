@@ -10,16 +10,24 @@ cd ~/Desktop/pii-review
 ./review
 ```
 
-A popup asks where the run is. Give it **one** location — the folder, zip or
-`s3://` prefix holding the whole run — and it works out which half is the
-source and which is the output. Ctrl-C to stop.
+A popup asks where the run is. Give it **one** location — a folder, a zip, or
+anything that names an S3 location — and it works out which half is the source
+and which is the output. Ctrl-C to stop.
+
+For S3, paste whatever you have. The console URL out of the address bar, either
+REST endpoint, an ARN, or the `s3://` URI all work, and the region comes off the
+URL when it is there. Pasting a location inside `_pii/output/` opens the run
+that output belongs to, so both halves are there to compare.
 
 Skip the popup:
 
 ```
 ./review ~/Downloads/some-export
 ./review s3://bucket/export --profile sail
+./review 'https://s3.console.aws.amazon.com/s3/buckets/bkt?region=ap-south-1&prefix=_pii/output/' --profile sail
 ```
+
+Quote a console URL — the `&` will otherwise background your shell.
 
 Python 3.9+, standard library only. Nothing is installed. PDFs scroll in step
 if PyMuPDF is importable by any interpreter on the box; without it they fall
