@@ -119,6 +119,16 @@ personal mobile is a leak. So is the opposite: a toll-free number, a column
 heading or a product name that got scrubbed. A right pane identical to the
 left means the redaction never ran; a blank one means it broke.
 
+Press `m` for the run's mapping table: every original the pipeline found, what
+it replaced it with, and the ones it found and left alone. Searchable, which
+is the only way to use thirty thousand substitutions. It is picked up from
+`_pii/pii_mappings.db` beside the output if the run shipped one, otherwise
+point at it:
+
+```
+./review --pair SRC OUT --profile sail --mappings ~/runs/_pii/pii_mappings.db
+```
+
 Verdicts save to `marks.json` as you go, keyed by the pair of locations, so
 closing the tab and coming back tomorrow resumes where you stopped.
 

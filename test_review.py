@@ -196,6 +196,62 @@ class AlignBySize(unittest.TestCase):
         self.assertEqual(len(idx["pairs"]), 1)
 
 
+class Mappings(unittest.TestCase):
+    """The run's substitution table, readable without a sqlite shell."""
+
+    def db(self, rows, table="mappings"):
+        import sqlite3
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = str(Path(d) / "pii_mappings.db")
+        con = sqlite3.connect(path)
+        con.execute(f"create table {table} (id integer primary key, original text, "
+                    "attribute_type text, replacement text, confidence real)")
+        con.executemany(f"insert into {table} (original, attribute_type, replacement) "
+                        "values (?,?,?)", rows)
+        con.commit()
+        con.close()
+        return path
+
+    def test_it_reads_the_table(self):
+        path = self.db([("a@b.com", "email", "x@y.com"),
+                        ("Acme", "company_name", "Zorp")])
+        out = review.read_mappings(path)
+        self.assertEqual(out["count"], 2)
+        # Grouped by type, so the panel reads as a table of kinds rather than
+        # of insertion order.
+        self.assertEqual([r["attribute_type"] for r in out["rows"]],
+                         ["company_name", "email"])
+
+    def test_a_row_the_run_never_replaced_survives(self):
+        # replacement NULL is itself the finding -- it was found and not acted
+        # on -- so it must not be dropped on the way to the panel.
+        path = self.db([("gmail.com", "company_name", None)])
+        self.assertIsNone(review.read_mappings(path)["rows"][0]["replacement"])
+
+    def test_a_database_with_no_mappings_table_says_so(self):
+        path = self.db([("a", "b", "c")], table="something_else")
+        with self.assertRaises(ValueError):
+            review.read_mappings(path)
+
+    def test_a_missing_file_is_a_clear_error(self):
+        with self.assertRaises(FileNotFoundError):
+            review.read_mappings("/tmp/definitely-not-here.db")
+
+    def test_it_is_found_beside_the_output_when_the_run_shipped_one(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        tree(Path(d), {"github/a.pdf": b"a", "_pii/pii_mappings.db": b"x"})
+        self.assertEqual(review.find_mappings(stores.open_store(d)),
+                         "_pii/pii_mappings.db")
+
+    def test_no_database_is_not_an_error(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        tree(Path(d), {"github/a.pdf": b"a"})
+        self.assertIsNone(review.find_mappings(stores.open_store(d)))
+
+
 class Thinning(unittest.TestCase):
     """A hundred pairs per app, chosen at random, stable across reopens."""
 
