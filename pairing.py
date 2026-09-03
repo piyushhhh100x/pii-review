@@ -71,59 +71,100 @@ def _tokens(name: str) -> set[str]:
     return {t for t in re.split(r"[^A-Za-z0-9]+", name.lower()) if len(t) > 1}
 
 
+#: Above this many left-times-right comparisons a folder is not a folder any
+#: more, it is a paginated shard dump. The passes that compare every file to
+#: every other file are quadratic, and on a mailbox of twenty thousand pages
+#: they cost half a minute to rank names like ``page_000173.jsonl`` that carry
+#: no distinguishing token in the first place. Past the bound those files are
+#: ordered by size instead, which is O(n log n) and, for a shard dump, the
+#: same answer.
+_PAIRWISE_MAX = 250_000
+
+
 def _match_bucket(left: list[str], right: list[str], size_of) -> list[tuple]:
     """Pair up one folder's worth of files. Returns (l, r, how) triples."""
     out: list[tuple] = []
     L, R = list(left), list(right)
 
-    # 1 — exact filename. These are the files the rewriter had no reason to
+    # 1 -- exact filename. These are the files the rewriter had no reason to
     # rename; taking them first stops a looser pass stealing one of them.
     by_base: dict[str, list[str]] = defaultdict(list)
     for r in R:
         by_base[segments(r)[-1]].append(r)
-    for l in list(L):
+    # Rebuilt rather than removed from. ``list.remove`` is a linear scan, so
+    # doing it once per match made this loop quadratic in the folder -- and a
+    # folder is twenty thousand files now that the listing reaches past the
+    # connector level. Seventeen thousand exact matches took half a minute
+    # inside these two removes alone.
+    used: set[str] = set()
+    rest: list[str] = []
+    for l in L:
         pool = by_base.get(segments(l)[-1])
         if pool:
-            r = pool.pop(0)
+            r = pool.pop()
             out.append((l, r, "exact"))
-            L.remove(l)
-            R.remove(r)
+            used.add(r)
+        else:
+            rest.append(l)
+    L, R = rest, [r for r in R if r not in used]
 
-    # 2 — surviving-token overlap. A scrubbed name keeps its numeric prefix and
-    # its tail ("610044998-Experian-CreditReport-CRVD-…" becomes
-    # "610044998-Vanova Ventures Corp.-CreditReport-CRVD-…"), so the overlap is
+    # 2 -- surviving-token overlap. A scrubbed name keeps its numeric prefix and
+    # its tail ("610044998-Experian-CreditReport-CRVD-..." becomes
+    # "610044998-Vanova Ventures Corp.-CreditReport-CRVD-..."), so the overlap is
     # large. A tie is left for a later pass rather than guessed.
-    for l in list(L):
-        want = _tokens(segments(l)[-1])
-        scored = sorted(((len(want & _tokens(segments(r)[-1])), r) for r in R),
-                        key=lambda t: -t[0])
-        if scored and scored[0][0] >= 2 and (
-            len(scored) == 1 or scored[0][0] > scored[1][0]
-        ):
-            r = scored[0][1]
-            out.append((l, r, "fuzzy"))
-            L.remove(l)
-            R.remove(r)
+    if L and R and len(L) * len(R) <= _PAIRWISE_MAX:
+        # Once per file, not once per comparison. Re-splitting every right-hand
+        # name for every left-hand name is the same quadratic mistake one level
+        # down.
+        rtok = {r: _tokens(segments(r)[-1]) for r in R}
+        taken: set[str] = set()
+        rest = []
+        for l in L:
+            want = _tokens(segments(l)[-1])
+            best = second = 0
+            pick = None
+            for r in R:
+                if r in taken:
+                    continue
+                n = len(want & rtok[r])
+                if n > best:
+                    best, second, pick = n, best, r
+                elif n > second:
+                    second = n
+            if pick is not None and best >= 2 and best > second:
+                out.append((l, pick, "fuzzy"))
+                taken.add(pick)
+            else:
+                rest.append(l)
+        L, R = rest, [r for r in R if r not in taken]
 
-    # 3 — sole survivor. One left on each side in the same folder is not a
+    # 3 -- sole survivor. One left on each side in the same folder is not a
     # guess; there is nothing else it could be. This is the case where the only
     # distinguishing token was the one that got replaced.
     if len(L) == 1 and len(R) == 1:
         out.append((L[0], R[0], "sole"))
         return out
 
-    # 4 — nearest size. Redaction changes a document's bytes but not its order
+    # 4 -- nearest size. Redaction changes a document's bytes but not its order
     # of magnitude, so sizes still rank the same way. Labelled so a reviewer
     # knows this pair was inferred.
     if L and R:
         sizes = {r: size_of(r) for r in R}
-        for l in sorted(L, key=lambda x: -size_of(x, left=True)):
-            if not R:
-                break
-            want = size_of(l, left=True)
-            r = min(R, key=lambda x: abs(sizes[x] - want))
-            out.append((l, r, "size"))
-            R.remove(r)
+        if len(L) * len(R) > _PAIRWISE_MAX:
+            # Same idea, done by rank instead of by search: both sides in size
+            # order, zipped. On a folder this big the nearest-size scan is the
+            # slowest thing in the program and lands on the same file anyway.
+            ls = sorted(L, key=lambda x: -size_of(x, left=True))
+            rs = sorted(R, key=lambda x: -sizes[x])
+            out += [(a, b, "size") for a, b in zip(ls, rs)]
+        else:
+            for l in sorted(L, key=lambda x: -size_of(x, left=True)):
+                if not R:
+                    break
+                want = size_of(l, left=True)
+                r = min(R, key=lambda x: abs(sizes[x] - want))
+                out.append((l, r, "size"))
+                R.remove(r)
     return out
 
 
@@ -159,6 +200,14 @@ def out_of_scope(left_dirs, right_dirs):
         for n in range(1, len(d) + 1):
             prefixes.add(d[:n])
 
+    # Indexed by parent, once. Both tests below ask the same question -- what
+    # names does the output use directly under this prefix -- and answering it
+    # by scanning every prefix in the output was 139 seconds of the 175 that a
+    # whole index took: 475 million tuple comparisons for one call.
+    children: dict[tuple, set] = defaultdict(set)
+    for pre in prefixes:
+        children[pre[:-1]].add(pre[-1])
+
     # Names the source uses at each level, so a level that was RENAMED can be
     # told apart from a branch that was skipped.
     siblings: dict[tuple, set] = {}
@@ -175,7 +224,8 @@ def out_of_scope(left_dirs, right_dirs):
             continue
         # The output must actually branch here, or "absent" means nothing --
         # it just means the trees diverge at this point for both halves.
-        if not any(len(pre) == k + 1 and pre[:k] == d[:k] for pre in prefixes):
+        at = children.get(d[:k])
+        if not at:
             continue
         # A level the pipeline RENAMES is not a level it skipped. The identity
         # folder is itself redacted -- google_calendar/anirudh.trivedi@inc42.com
@@ -186,9 +236,7 @@ def out_of_scope(left_dirs, right_dirs):
         # and an absent one really was skipped; none matching means they were
         # all rewritten, and nothing here can be judged out of scope.
         here = siblings.get(d[:k], set())
-        carried = {seg for seg in here
-                   if any(len(pre) == k + 1 and pre[:k] == d[:k] and pre[k] == seg
-                          for pre in prefixes)}
+        carried = here & at
         if not carried:
             continue
         dropped.setdefault("/".join(d[:k + 1]), []).append(d)
@@ -419,14 +467,21 @@ def build(left_store, right_store, ignore=None, left_only=None, right_only=None,
     lcount = Counter(segments(p)[-1] for p in leftover_l)
     rcount = Counter(segments(p)[-1] for p in leftover_r)
     rby: dict[str, str] = {segments(p)[-1]: p for p in leftover_r}
-    for l in list(leftover_l):
+    # Collected and filtered out in one pass. Removing from the lists as they
+    # matched was a linear scan per match over thirty thousand leftovers, and
+    # it cost more than every other pass in this file put together.
+    took_l: set[str] = set()
+    took_r: set[str] = set()
+    for l in leftover_l:
         base = segments(l)[-1]
         if lcount[base] == 1 and rcount.get(base) == 1:
             r = rby[base]
             pairs.append({"left": l, "right": r, "how": "name",
                           "folder": "/".join(normalise(l, ignore)[:-1])})
-            leftover_l.remove(l)
-            leftover_r.remove(r)
+            took_l.add(l)
+            took_r.add(r)
+    leftover_l = [p for p in leftover_l if p not in took_l]
+    leftover_r = [p for p in leftover_r if p not in took_r]
 
     # Only now, once every route to a counterpart has been tried: source
     # branches the output covers nothing of were never in this run. Held back
@@ -591,3 +646,144 @@ def autosplit(paths: list[str]) -> dict:
         warn = (f"{output}/ holds {names[output]} of the {names[source]} "
                 f"documents in {source}/ — check this is the pair you want")
     return {"options": options, "source": source, "output": output, "warn": warn}
+
+
+#: Words that make a dotted pair something other than a person. A folder called
+#: ``canvases.json`` or ``data.platform`` has the shape of ``ajay.priyadarshi``
+#: and none of the meaning.
+_NOT_A_NAME = {
+    "json", "jsonl", "ndjson", "csv", "tsv", "txt", "log", "logs", "xml", "html",
+    "htm", "pdf", "zip", "gz", "tar", "db", "sqlite", "parquet", "yaml", "yml",
+    "com", "net", "org", "www", "io", "co", "in",
+    "data", "meta", "index", "page", "pages", "file", "files", "doc", "docs",
+    "test", "tests", "temp", "tmp", "backup", "config", "conf", "state", "done",
+    "main", "prod", "dev", "staging", "shared", "team", "admin", "user", "users",
+    "export", "exports", "import", "imports", "report", "reports", "raw", "out",
+    "output", "input", "src", "lib", "bin", "api", "web", "app", "apps",
+}
+
+_EMAIL_LIKE = re.compile(r"[^@\s/]+@[^@\s/]+\.[A-Za-z]{2,}")
+_LONG_NUMBER = re.compile(r"(?<!\d)\d{9,}(?!\d)")
+#: ``ajay.priyadarshi`` and ``Ajay.Priyadarshi``, but not
+#: ``SQAiwJUCNsA.SQAiwJUCNsA``. Both halves have to be shaped like a WORD --
+#: an optional leading capital and lower case after it. Without the shape test
+#: every Google Chat message id in the run was announced as a person's name,
+#: fourteen of them in one export, which is how a flag stops being read.
+_DOTTED_NAME = re.compile(r"^([A-Z]?[a-z]{2,})\.([A-Z]?[a-z]{2,})$")
+
+#: Prefixes an export uses for a conversation between named people. Both are
+#: Slack's, which is where they keep turning up, and neither is a guess: a
+#: folder called ``dm_ashish_sharma`` is named after a person by construction.
+_CONVERSATION_PREFIXES = ("dm_", "dm-", "mpdm_", "mpdm-")
+
+
+def looks_personal(name: str) -> str | None:
+    """Why a folder NAME reads as somebody's personal data, or ``None``.
+
+    The pipeline redacts what is INSIDE a document and, when it works, the
+    identity folder around it. When it does not, the leak is in the object key
+    itself: ``gmail/anirudh.trivedi@inc42.com/messages/page_000001.jsonl`` is a
+    name and an employer whether or not a single byte inside was scrubbed, and
+    a reviewer reading the two panes never sees it.
+
+    Deliberately narrow. The reason is shown to the reviewer rather than acted
+    on, so a miss costs one unflagged row, but a folder called ``data-platform``
+    announced as a person costs the reviewer's trust in every other flag on the
+    screen. Hence dots and not hyphens for names, and a vocabulary of the words
+    that give a dotted pair a non-human reading.
+    """
+    n = (name or "").strip()
+    if not n:
+        return None
+    if _EMAIL_LIKE.search(n):
+        return "an email address"
+    low = n.lower()
+    if low.startswith(_CONVERSATION_PREFIXES):
+        return "a conversation, named after the people in it"
+    if _LONG_NUMBER.search(n):
+        return "a long number — an id, a phone or an account"
+    m = _DOTTED_NAME.match(n)
+    if m and not {m.group(1).lower(), m.group(2).lower()} & _NOT_A_NAME:
+        return "a person's name"
+    return None
+
+
+#: How deep the folder audit goes. Past this the levels are a document's own
+#: pagination -- ``_pages``, ``page_000001`` -- repeated once per identity, and
+#: they bury the levels that carry a name.
+_AUDIT_DEPTH = 4
+
+
+def folder_map(pairs, ignore, left_dirs=(), partial: bool = False) -> list[dict]:
+    """Every source folder beside the output folder it became.
+
+    Built from the pairs themselves rather than from the rename table: a pair
+    is the strongest evidence there is that two folders are the same folder,
+    and it covers the levels that were never renamed as well as the ones that
+    were. Both sides are normalised first, so the layout segments that differ
+    by design (``raw/`` against ``files/``) are gone and what is left lines up
+    level for level.
+
+    Where several documents disagree about what a folder became -- which is
+    what a mis-pair looks like from here -- the majority wins and the rest are
+    reported as ``shared``, because a source folder split across two output
+    folders is itself the finding.
+
+    ``partial`` suppresses "nothing in the output for this folder". A capped
+    listing makes a present folder look absent, and a false report that the
+    pipeline dropped an entire person is the most expensive thing this tool
+    can say.
+    """
+    votes: dict[tuple, Counter] = defaultdict(Counter)
+    for p in pairs:
+        if not p.get("right"):
+            continue
+        ln = normalise(p["left"], ignore)[:-1]
+        rn = normalise(p["right"], ignore)[:-1]
+        # Level-for-level or not at all. Trees of different depth can still
+        # pair document to document, but then no level corresponds to any
+        # other and every "renamed to" this produced would be invented.
+        if len(ln) != len(rn) or not ln:
+            continue
+        for k in range(min(len(ln), _AUDIT_DEPTH)):
+            votes[ln[:k + 1]][rn[k]] += 1
+
+    seen = set(votes)
+    if not partial:
+        for d in left_dirs:
+            for k in range(min(len(d), _AUDIT_DEPTH)):
+                if d[:k + 1] not in seen:
+                    votes.setdefault(d[:k + 1], Counter())
+
+    # A name two source folders both turned into is a collision: two people's
+    # documents landed under one identity in the deliverable.
+    claimed: dict[tuple, list[tuple]] = defaultdict(list)
+    for path, tally in votes.items():
+        if tally:
+            claimed[path[:-1] + (tally.most_common(1)[0][0],)].append(path)
+
+    rows = []
+    for path, tally in sorted(votes.items()):
+        out = tally.most_common(1)[0][0] if tally else None
+        name = path[-1]
+        if out is None:
+            state = "none"
+        elif out == name:
+            state = "kept"
+        else:
+            state = "changed"
+        rows.append({
+            "path": "/".join(path),
+            "parent": "/".join(path[:-1]),
+            "name": name,
+            "out": out,
+            "files": sum(tally.values()),
+            "state": state,
+            # Only an UNCHANGED name can leak. A rewritten one is doing its job
+            # whatever it used to look like.
+            "risk": looks_personal(name) if state != "changed" else None,
+            "also": sorted(n for n, _ in tally.most_common()[1:]),
+            "shared": sorted("/".join(o) for o in claimed.get(
+                path[:-1] + (out,), []) if o != path) if out else [],
+        })
+    return rows
