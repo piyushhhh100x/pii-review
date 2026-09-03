@@ -484,9 +484,25 @@ class Pairing(unittest.TestCase):
         self.assertEqual(idx["pairs"], [])
 
     def test_a_unique_name_still_pairs_across_folders(self):
+        # Found as "exact" rather than "name": aa/ and zz/ hold one file each
+        # and the shape is unique on both sides, so the folders are lined up
+        # first and the filenames then match inside them. Stronger evidence
+        # than the last-resort join on filename alone, and the same pair.
         idx = self.build({"u/raw/aa/only-one.pdf": b"a", "u/out/zz/only-one.pdf": b"A"},
                          left_only="raw", right_only="out")
-        self.assertEqual([p["how"] for p in idx["pairs"]], ["name"])
+        self.assertEqual([(p["left"], p["right"]) for p in idx["pairs"]],
+                         [("u/raw/aa/only-one.pdf", "u/out/zz/only-one.pdf")])
+
+    def test_ambiguous_shapes_are_not_lined_up_by_guesswork(self):
+        # Two folders a side, all four holding the same one filename. Nothing
+        # says which maps to which, and guessing puts one person's source
+        # beside another person's output -- every difference then reads as a
+        # leak. Better to leave them unpaired.
+        idx = self.build({
+            "u/raw/aa/page_000001.jsonl": b"a", "u/raw/bb/page_000001.jsonl": b"b",
+            "u/out/cc/page_000001.jsonl": b"A", "u/out/dd/page_000001.jsonl": b"B",
+        }, left_only="raw", right_only="out")
+        self.assertEqual(idx["pairs"], [])
 
     def test_output_selected_below_an_underscore_folder(self):
         # The document filter must run below the selector, or selecting
