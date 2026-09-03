@@ -112,6 +112,52 @@ class Formatting(unittest.TestCase):
         self.assertLess(out["html"].count('class=rec>'), 900)
 
 
+class Thinning(unittest.TestCase):
+    """A hundred pairs per app, chosen at random, stable across reopens."""
+
+    def rows(self, app, n):
+        return [{"label": f"{app}/f{i:04}.txt", "id": i} for i in range(n)]
+
+    def test_a_small_app_is_left_alone(self):
+        kept, dropped = review._thin(self.rows("gmail", 30), 100)
+        self.assertEqual(len(kept), 30)
+        self.assertEqual(dropped, {})
+
+    def test_a_big_app_is_cut_to_the_cap(self):
+        kept, dropped = review._thin(self.rows("gmail", 900), 100)
+        self.assertEqual(len(kept), 100)
+        self.assertEqual(dropped, {"gmail": 800})
+
+    def test_the_budget_is_per_app_not_per_run(self):
+        # One budget spent top-down goes entirely to whichever app sorts
+        # first and shows none of the rest.
+        rows = self.rows("gmail", 500) + self.rows("google_drive", 500)
+        kept, _ = review._thin(rows, 100)
+        got = {}
+        for r in kept:
+            got[r["label"].split("/")[0]] = got.get(r["label"].split("/")[0], 0) + 1
+        self.assertEqual(got, {"gmail": 100, "google_drive": 100})
+
+    def test_it_is_not_just_the_first_hundred(self):
+        # S3 hands back keys in sort order, so the head of the list is always
+        # the same corner of the same export.
+        kept, _ = review._thin(self.rows("gmail", 900), 100)
+        self.assertNotEqual([r["label"] for r in kept],
+                            [r["label"] for r in self.rows("gmail", 900)[:100]])
+
+    def test_the_same_run_thins_to_the_same_files(self):
+        # Verdicts are keyed by path. A sample that reshuffled on reopen would
+        # strand yesterday's review against files nobody can see today.
+        a, _ = review._thin(self.rows("gmail", 900), 100)
+        b, _ = review._thin(self.rows("gmail", 900), 100)
+        self.assertEqual([r["label"] for r in a], [r["label"] for r in b])
+
+    def test_zero_means_no_thinning(self):
+        kept, dropped = review._thin(self.rows("gmail", 900), 0)
+        self.assertEqual(len(kept), 900)
+        self.assertEqual(dropped, {})
+
+
 class Planning(unittest.TestCase):
     """Several locations means several reviews, one browser tab each."""
 

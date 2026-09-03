@@ -16,6 +16,7 @@ import http.server
 import io
 import json
 import mimetypes
+import random
 import re
 import socketserver
 import subprocess
@@ -1390,8 +1391,47 @@ def inspect_root(root: str, profile: str | None) -> dict:
     return out
 
 
+#: Pairs kept per app folder. Nobody reviews an export end to end -- the job
+#: is a few files per app and a search for the handful somebody reported -- and
+#: a list of 121,538 is one nobody can navigate.
+PER_APP = 100
+
+
+def _thin(rows, per_app: int):
+    """At most ``per_app`` pairs per app folder, chosen at random.
+
+    Per app, not per run: a single budget spent top-down would go entirely to
+    whichever app sorts first and show none of the rest.
+
+    Random rather than the first N, because S3 hands back keys in sort order,
+    so the head of the list is always page_000001 of whoever sorts first --
+    the same corner of the same export every time, with whole categories of
+    defect never on screen.
+
+    Seeded on the app name, so the same run thins to the same files every time
+    it is opened. Verdicts in marks.json are keyed by path, and a sample that
+    reshuffled on reopen would strand yesterday's review against files nobody
+    can see today.
+    """
+    if not per_app:
+        return rows, {}
+    by_app: dict[str, list] = {}
+    for r in rows:
+        by_app.setdefault(r["label"].split("/")[0], []).append(r)
+    kept, dropped = [], {}
+    for app, group in by_app.items():
+        if len(group) <= per_app:
+            kept += group
+            continue
+        dropped[app] = len(group) - per_app
+        kept += random.Random(app).sample(group, per_app)
+    kept.sort(key=lambda r: r["label"])
+    return kept, dropped
+
+
 def open_review(root=None, left=None, right=None, profile=None,
-                source=None, output=None, ignore=None, label=None) -> dict:
+                source=None, output=None, ignore=None, label=None,
+                per_app: int = PER_APP) -> dict:
     ls, rs, filt = _sides(root, left, right, profile, source, output)
     ign = {s.strip().lower() for s in (ignore or pairing.DEFAULT_IGNORE) if s.strip()}
     ign |= {s.lower() for s in (source, output) if s}
@@ -1410,6 +1450,7 @@ def open_review(root=None, left=None, right=None, profile=None,
         rows.append({"id": len(rows), "left": lp, "right": None, "how": "missing",
                      "label": "/".join(pairing.normalise(lp, ign))})
     rows.sort(key=lambda r: r["label"])
+    rows, thinned = _thin(rows, per_app)
     for n, r in enumerate(rows):
         r["id"] = n
 
@@ -1446,6 +1487,11 @@ def open_review(root=None, left=None, right=None, profile=None,
     # and the documents belonging to the OTHER ones are not findings -- but
     # "your location covers more than this run" is worth a line, and hiding
     # rows without saying so would be worse than the noise it removes.
+    if thinned:
+        named = ", ".join(f"{a}/ ({n} more)" for a, n in
+                          sorted(thinned.items(), key=lambda t: -t[1])[:4])
+        print(f"  showing {per_app} per app — not shown: {named}", flush=True)
+
     units = idx.get("out_of_scope_units") or {}
     scope_note = None
     if units:
@@ -1495,6 +1541,7 @@ def open_review(root=None, left=None, right=None, profile=None,
     session = {"pairs": rows, "marks": marks, "counts": counts,
                "left": S["left"], "right": S["right"], "hint": hint,
                "scope_note": scope_note,
+               "thinned": thinned,
                "left_short": short(ls, source), "right_short": short(rs, output),
                "source": source, "output": output, "root": root,
                # What the browser tab is named. Two tabs on two batches are
@@ -1767,16 +1814,25 @@ def _fan_out(jobs, a) -> int:
     # connection-refused pages, which reads as "the tool is broken".
     print(f"\n  starting {len(jobs)} reviews — this takes a moment each\n", flush=True)
     for (label, url), kid in zip(urls, kids):
-        ready = False
-        for _ in range(240):
-            if kid.poll() is not None:
-                break
+        ready, waited = False, 0.0
+        # Wait for as long as the child is alive rather than on a clock.
+        # A fixed budget was wrong: indexing an S3 prefix is a paginated walk
+        # of every key, which took minutes on the real runs, and a two-minute
+        # cap reported "did not start" for reviews that were about to come up
+        # perfectly. The child exiting is the only honest failure signal.
+        while kid.poll() is None:
             try:
-                urllib.request.urlopen(url, timeout=1).read(1)
+                urllib.request.urlopen(url, timeout=2).read(1)
                 ready = True
                 break
             except Exception:  # noqa: BLE001 -- still indexing
-                time.sleep(0.5)
+                time.sleep(1.0)
+                waited += 1.0
+                # Silence past half a minute reads as a hang, and the reason
+                # it is slow (a large bucket) is worth naming.
+                if waited % 30 == 0:
+                    print(f"    …still indexing {label}  ({int(waited)}s)",
+                          flush=True)
         if ready:
             print(f"    {url}   {label}", flush=True)
             if not a.no_open:
@@ -1784,9 +1840,9 @@ def _fan_out(jobs, a) -> int:
         else:
             # Silence is the wrong failure mode. Show why this one did not
             # come up, from its own log, instead of a bare "did not start".
-            print(f"  ! {label} did not start:", flush=True)
-            why = Path(logs[urls.index((label, url))]).read_text()[-500:].strip()
-            for line in (why or "no output").splitlines()[-6:]:
+            print(f"  ! {label} stopped before it was ready:", flush=True)
+            why = Path(logs[urls.index((label, url))]).read_text()[-800:].strip()
+            for line in (why or "it wrote nothing").splitlines()[-8:]:
                 print(f"      {line}", flush=True)
     print("\n  Ctrl-C stops all of them.\n", flush=True)
     try:

@@ -7,8 +7,10 @@ directory, a zip, or an S3 prefix. Everything above this file works against
 """
 from __future__ import annotations
 
+import concurrent.futures as cf
 import functools
 import io
+import random
 import re
 import subprocess
 import threading
@@ -283,8 +285,16 @@ class S3Store(Store):
 
     kind = "s3"
 
+    #: Pages read per branch. A thousand keys a page. Bounded because a full
+    #: walk of a real export is ~120 sequential round trips PER SIDE -- minutes
+    #: of blank screen before the first document appears -- and nobody reviews
+    #: 121,538 documents. Five pages a branch is read in parallel and lands in
+    #: seconds.
+    SCAN_PAGES = 5
+    DEFAULT_CAP = 1  # any truthy value: the bound is SCAN_PAGES, not a count
+
     def __init__(self, spec: str, profile: str | None = None,
-                 region: str | None = None):
+                 region: str | None = None, cap: int | None = -1):
         uri = parse_s3(spec)
         spec = uri[0] if uri else spec
         region = region or (uri[1] if uri else None)
@@ -293,6 +303,8 @@ class S3Store(Store):
         self.bucket, _, self.prefix = rest.partition("/")
         self.profile = profile or None
         self.region = region or None
+        self.cap = self.DEFAULT_CAP if cap == -1 else (cap or 0)
+        self.capped = False
         self._client = None
         self._size_map: dict[str, int] = {}
         try:
@@ -312,21 +324,110 @@ class S3Store(Store):
             raise RuntimeError(done.stderr.decode()[:400] or "aws failed")
         return done.stdout
 
+    def _walk(self, prefix: str):
+        """Keys under one prefix, paginated, stopping at ``self.cap``.
+
+        The cap is why this tool opens at all on a real export. S3 returns a
+        thousand keys per request and will not say how many there are, so a
+        full walk of a 121,538-document run is ~120 sequential round trips per
+        side -- minutes of blank screen. Nobody reviews 121,538 documents.
+        The job is to look at a few per app and to search for the handful
+        somebody reported, so take a sample of each branch and get out.
+
+        Per BRANCH, not per run: capping the total would spend the whole
+        budget inside whichever app sorts first and show none of the rest.
+        """
+        keys, sizes, token, pages = [], {}, None, 0
+        while True:
+            kw = {"Bucket": self.bucket, "Prefix": prefix}
+            if token:
+                kw["ContinuationToken"] = token
+            page = self._client.list_objects_v2(**kw)
+            for o in page.get("Contents", []):
+                keys.append(o["Key"])
+                sizes[o["Key"]] = o.get("Size", 0)
+            token = page.get("NextContinuationToken")
+            pages += 1
+            if not token or (self.cap and pages >= self.SCAN_PAGES):
+                break
+        # Deliberately NOT sampled here. Sampling keys is what a first attempt
+        # did, and it cost 99% of the pairs: each side drew its own hundred at
+        # random, the two draws barely overlapped, and 1,269 pairs became 10.
+        # The two halves have to be listed whole for anything to pair at all.
+        # Thinning happens once, on the PAIRS, in open_review.
+        self.capped = self.capped or bool(token)
+        return keys, sizes
+
+    def _walk_shallow(self, prefix: str):
+        """Keys directly under ``prefix``, skipping the folders the threads
+        already covered. Without this, a run with loose files at its root
+        loses them."""
+        keys, sizes, token = [], {}, None
+        while True:
+            kw = {"Bucket": self.bucket, "Prefix": prefix, "Delimiter": "/"}
+            if token:
+                kw["ContinuationToken"] = token
+            page = self._client.list_objects_v2(**kw)
+            for o in page.get("Contents", []):
+                keys.append(o["Key"])
+                sizes[o["Key"]] = o.get("Size", 0)
+            token = page.get("NextContinuationToken")
+            if not token:
+                return keys, sizes
+
+    def _branches(self, base: str, depth: int = 2) -> list[str]:
+        """Child folders of ``base``, descended while the tree is still narrow.
+
+        One level is not enough. A gmail export is ``gmail/<person>/...`` --
+        a single top-level folder -- so a per-branch sample taken at depth 1
+        is a sample of one branch, i.e. all of it from one person. Descending
+        while there are few branches turns that into a sample per person,
+        which is what "a few files per app" actually means.
+        """
+        out = self._children(base)
+        while depth > 1 and 0 < len(out) <= 4:
+            deeper = [c for b in out for c in self._children(b)]
+            if not deeper:
+                break
+            out, depth = deeper, depth - 1
+        return out
+
+    def _children(self, base: str) -> list[str]:
+        """Immediate child folders of ``base``, one cheap delimited call."""
+        out, token = [], None
+        while True:
+            kw = {"Bucket": self.bucket, "Prefix": base, "Delimiter": "/"}
+            if token:
+                kw["ContinuationToken"] = token
+            page = self._client.list_objects_v2(**kw)
+            out += [c["Prefix"] for c in page.get("CommonPrefixes", [])]
+            token = page.get("NextContinuationToken")
+            if not token:
+                return out
+
     def _list(self):
         base = f"{self.prefix}/" if self.prefix else ""
         if self._client is not None:
-            keys, token = [], None
-            while True:
-                kw = {"Bucket": self.bucket, "Prefix": base}
-                if token:
-                    kw["ContinuationToken"] = token
-                page = self._client.list_objects_v2(**kw)
-                for o in page.get("Contents", []):
-                    keys.append(o["Key"])
-                    self._size_map[o["Key"]] = o.get("Size", 0)
-                token = page.get("NextContinuationToken")
-                if not token:
-                    break
+            # S3 paginates a thousand keys at a time and will not tell you how
+            # many there are, so a flat walk of a large export is a few hundred
+            # sequential round trips -- minutes of blank screen before the
+            # first document appears. Split the walk by top-level folder and
+            # run the branches at once. Nothing is downloaded either way: this
+            # is the key listing, and document bytes are still read one at a
+            # time, on demand, as the reviewer arrives at them.
+            keys = []
+            branches = self._branches(base)
+            if len(branches) > 1:
+                with cf.ThreadPoolExecutor(max_workers=min(16, len(branches))) as ex:
+                    parts = list(ex.map(self._walk, branches))
+                # Keys sitting directly in base, alongside the folders.
+                parts.append(self._walk_shallow(base))
+                for k, sz in parts:
+                    keys += k
+                    self._size_map.update(sz)
+            else:
+                keys, sizes = self._walk(base)
+                self._size_map.update(sizes)
         else:
             out = self._aws("s3", "ls", f"s3://{self.bucket}/{base}", "--recursive")
             keys = []
@@ -351,14 +452,15 @@ class S3Store(Store):
         return self._aws("s3", "cp", f"s3://{self.bucket}/{key}", "-")
 
 
-def open_store(spec: str, profile: str | None = None) -> Store:
+def open_store(spec: str, profile: str | None = None,
+               cap: int | None = -1) -> Store:
     """Pick a backend from the shape of ``spec``. Raises with a usable message."""
     spec = (spec or "").strip()
     if not spec:
         raise ValueError("give a folder, a .zip, or an S3 location")
     s3 = parse_s3(spec)
     if s3:
-        return S3Store(s3[0], profile, s3[1])
+        return S3Store(s3[0], profile, s3[1], cap)
     p = Path(spec).expanduser()
     if p.is_dir():
         return DirStore(str(p))
