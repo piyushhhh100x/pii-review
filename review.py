@@ -576,6 +576,76 @@ _CANNOT = {
 }
 
 
+# --- the mapping table the pipeline built ------------------------------------
+# Reviewing the output tells you a name was replaced. It does not tell you
+# WHAT it was replaced with everywhere else, or whether one person got two
+# fake identities, or whether a company name was mapped to something that
+# reads like a real company. That is all in pii_mappings.db, and until now the
+# only way to look was to download it and open a sqlite shell.
+
+MAP_NAMES = ("pii_mappings.db", "mappings.db")
+
+
+def find_mappings(store) -> str | None:
+    """The run's mapping database inside an output location, if it shipped one.
+
+    Often it did not -- the file is written beside the run and not always
+    uploaded -- so this returns None rather than raising, and ``--mappings``
+    exists for pointing at one by hand.
+    """
+    try:
+        for path in store.paths:
+            if Path(path).name in MAP_NAMES:
+                return path
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def read_mappings(spec: str, profile: str | None = None, store=None,
+                  inner: str | None = None) -> dict:
+    """Rows of the mappings table, plus what the run replaced things with.
+
+    sqlite needs a real file and cannot read from a bucket, so an S3 database
+    is fetched once to a temp file and kept for the life of the process. These
+    are a few megabytes at most -- the mappings for a whole export are tens of
+    thousands of short strings.
+    """
+    import sqlite3
+    import tempfile
+
+    key = f"{spec}::{inner}"
+    hit = _MAP_CACHE.get(key)
+    if hit is None:
+        if store is not None and inner is not None:
+            data = store.read(inner)
+            tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+            tmp.write(data)
+            tmp.close()
+            hit = tmp.name
+        else:
+            local = Path(spec).expanduser()
+            if not local.exists():
+                raise FileNotFoundError(f"no mapping database at {spec}")
+            hit = str(local)
+        _MAP_CACHE[key] = hit
+
+    con = sqlite3.connect(f"file:{hit}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    cols = {r[1] for r in con.execute("pragma table_info(mappings)")}
+    if not cols:
+        raise ValueError("no mappings table in this database")
+    want = [c for c in ("original", "attribute_type", "replacement", "source",
+                        "confidence", "generated_by", "deleted") if c in cols]
+    rows = [dict(r) for r in con.execute(
+        f"select {', '.join(want)} from mappings order by attribute_type, original")]
+    con.close()
+    return {"rows": rows, "count": len(rows), "path": spec}
+
+
+_MAP_CACHE: dict[str, str] = {}
+
+
 def session_id(left: str, right: str) -> str:
     """Stable id for a (left, right) pair, so verdicts survive a re-open."""
     h = hashlib.sha256(f"{left}\x00{right}".encode()).hexdigest()[:12]
@@ -697,6 +767,24 @@ header{border-bottom:1px solid var(--line);padding:7px 12px;display:flex;gap:10p
 #body.narrow #side{display:none}
 #body.info{grid-template-columns:250px 1fr 268px}
 #body.narrow.info{grid-template-columns:1fr 268px}
+/* The mapping table, over the panes. A modal because verifying a substitution
+   is a detour from reviewing documents, not a thing you do beside it. */
+#mveil{position:fixed;inset:0;background:rgba(26,29,33,.34);display:none;z-index:70;padding:34px}
+#mveil.on{display:grid;place-items:center}
+#mbox{background:#fff;border-radius:10px;width:min(980px,96vw);max-height:86vh;
+  display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,.22)}
+.mhead{display:flex;gap:10px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line)}
+.mhead input{flex:1;font:12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
+  padding:5px 8px;border:1px solid var(--line);border-radius:6px}
+#mbody{overflow:auto;padding:0 14px 14px}
+#mbody table{border-collapse:collapse;width:100%;font-size:12.5px;table-layout:fixed}
+#mbody th{position:sticky;top:0;background:#f5f6f8;text-align:left;font-weight:600;
+  padding:6px;border-bottom:1px solid var(--line);z-index:1}
+#mbody td{padding:4px 6px;border-bottom:1px solid #f0f2f4;vertical-align:top;
+  word-break:normal;overflow-wrap:break-word}
+#mbody td.o{color:var(--bad)}
+#mbody td.r{color:var(--ok)}
+#mbody td.t{color:var(--mut);white-space:nowrap;width:15%}
 #info{display:none;border-left:1px solid var(--line);background:#fcfcfd;overflow:auto;min-height:0;padding:12px 13px 26px}
 #body.info #info{display:block}
 #info h3{font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--mut);
@@ -804,10 +892,17 @@ kbd{font:11px ui-monospace,Menlo,monospace;background:var(--soft);border:1px sol
   </main>
   <aside id="info"></aside>
 </div>
+<div id="mveil"><div id="mbox">
+  <div class="mhead"><b>Mappings</b><span id="mcount" class="opt"></span>
+    <input id="mq" placeholder="search original, replacement or type" spellcheck="false">
+    <span class="x" id="mx">&times;</span></div>
+  <div id="mbody"></div>
+</div></div>
 <footer>
   <span><kbd>enter</kbd> review + next · <kbd>r</kbd> review · <kbd>c</kbd> comment</span>
   <span><kbd>&uarr;</kbd><kbd>&darr;</kbd> file · <kbd>&larr;</kbd><kbd>&rarr;</kbd> folder · <kbd>[</kbd><kbd>]</kbd> page</span>
   <span><kbd>a</kbd> <span id="mode">unreviewed only</span></span>
+  <span><kbd>m</kbd> mappings</span>
   <span><kbd>s</kbd> list · <kbd>i</kbd> details · <kbd>y</kbd> <span id="syn">sync on</span> · <kbd>?</kbd> keys</span>
   <input id="jump" placeholder="jump # or name">
 </footer>
@@ -915,6 +1010,8 @@ function start(r){
   el("loc").textContent=where; el("loc").title=r.root||"";
   document.title=where+" · "+(r.pairs?r.pairs.length:0)+" docs";
   THIN=r.thinned||{};
+  TOTB=(r.pairs||[]).reduce((a,p)=>a+(p.lb||0),0);
+  HASMAP=!!r.has_map;
   if(r.hint){el("btext").textContent=r.hint.text;el("bfix").textContent="use "+r.hint.output+"/";
     el("bfix").onclick=()=>{el("out").value=r.hint.output;el("banner").classList.remove("on");open_();};
     el("bfix").style.display=""; el("banner").classList.add("on");}
@@ -956,9 +1053,9 @@ function list(){
   const auto = q() && groups.size<=12;
 
   const add=(name,files,isAll)=>{
-    let done=0,miss=0,note=0;
+    let done=0,miss=0,note=0,bytes=0;
     files.forEach(p=>{const x=rec(p); if(x.reviewed) done++; note+=x.comments.length;
-      if(p.how==="missing") miss++; });
+      bytes+=p.lb||0; if(p.how==="missing") miss++; });
     const full = done>=files.length && files.length>0;
     // What is worth knowing per folder is how much of the app is on screen
     // and how far through it you are. "5/920" answered neither: it read as
@@ -973,6 +1070,9 @@ function list(){
     else bits.push(`${files.length} file${files.length===1?"":"s"}`);
     if(done) bits.push(done===files.length?"all reviewed":`${done} reviewed`);
     else if(left) bits.push(`${left} to go`);
+    // Weight, and what share of the run it is. "100 files" says nothing about
+    // whether that is ten minutes or an afternoon.
+    if(bytes) bits.push(kb(bytes) + ((TOTB&&!isAll)?` · ${Math.round(bytes*100/TOTB)}%`:""));
     if(note) bits.push(`${note} comment${note===1?"":"s"}`);
     if(miss) bits.push(`<span class="w">${miss} missing</span>`);
     const opened = isAll ? false : (OPEN===name || auto);
@@ -1026,7 +1126,7 @@ el("hideside").onclick=()=>toggleSide(false);
 el("showside").onclick=()=>toggleSide(true);
 
 /* ---------- panes ---------- */
-let PAGE=1,LS=null,RS=null,BUSY=false,SEQ=0,INFO=false,MSEQ=0,THIN={};
+let PAGE=1,LS=null,RS=null,BUSY=false,SEQ=0,INFO=false,MSEQ=0,THIN={},TOTB=0,HASMAP=false;
 function iframeFor(side,id){const f=document.createElement("iframe");
  f.src="/doc/"+side+"/"+id+(PAGE>1?"#page="+PAGE:""); return f;}
 function build_pane(box,side,id,meta){
@@ -1301,7 +1401,36 @@ function jump(s){
 }
 el("jump").addEventListener("keydown",e=>{if(e.key==="Enter"){jump(e.target.value);e.target.blur();}});
 
+let MAPQ=null;
+function maps(){
+  if(!HASMAP){alert("No mapping database for this run.\n\nPoint at one with --mappings /path/to/pii_mappings.db");return;}
+  el("mveil").classList.add("on"); el("mq").focus(); loadMaps();
+}
+async function loadMaps(){
+  const q=el("mq").value.trim();
+  const seq=++MSEQ;
+  const r=await(await fetch("/api/mappings?q="+encodeURIComponent(q))).json();
+  if(seq!==MSEQ)return;
+  if(r.error){el("mbody").innerHTML=`<p class="more">${esc(r.error)}</p>`;
+    el("mcount").textContent=""; return;}
+  el("mcount").textContent = q ? `${r.matched} of ${r.count}` : `${r.count} mappings`;
+  const rows=r.shown.map(m=>`<tr><td class=t>${esc(m.attribute_type||"?")}</td>`+
+    `<td class=o>${esc(m.original==null?"":String(m.original))}</td>`+
+    `<td class=r>${m.replacement==null?"<i>not replaced</i>":esc(String(m.replacement))}</td></tr>`).join("");
+  el("mbody").innerHTML = rows
+    ? `<table><thead><tr><th>type</th><th>original</th><th>replacement</th></tr></thead><tbody>${rows}</tbody></table>`
+      + (r.matched>r.shown.length?`<p class="more">${r.matched-r.shown.length} more — narrow the search</p>`:"")
+    : `<p class="more">Nothing matches “${esc(q)}”.</p>`;
+}
+el("mq").addEventListener("input",()=>{clearTimeout(MAPQ);MAPQ=setTimeout(loadMaps,180);});
+el("mx").onclick=()=>el("mveil").classList.remove("on");
+el("mveil").onclick=e=>{if(e.target.id==="mveil")el("mveil").classList.remove("on");};
+
 addEventListener("keydown",e=>{
+  if(el("mveil").classList.contains("on")){
+    if(e.key==="Escape"){el("mveil").classList.remove("on");}
+    return;
+  }
   if(el("app").style.display==="none")return;
   if(e.target.tagName==="INPUT"||e.target.tagName==="SELECT"){
     if(e.key==="Escape") e.target.blur();
@@ -1321,6 +1450,7 @@ addEventListener("keydown",e=>{
   else if(kl==="c"){e.preventDefault();el("cbox").focus();}
   else if(kl==="s"){e.preventDefault();toggleSide();}
   else if(kl==="i"){e.preventDefault();toggleInfo();}
+  else if(kl==="m"){e.preventDefault();maps();}
   else if(kl==="y"){e.preventDefault();SYNC=!SYNC;el("syn").textContent=SYNC?"sync on":"sync off";}
   else if(kl==="a"){e.preventDefault();onlyNew=!onlyNew;
     el("mode").textContent=onlyNew?"unreviewed only":"all files";build();list();render();}
@@ -1448,15 +1578,26 @@ def _thin(rows, per_app: int):
 
 def open_review(root=None, left=None, right=None, profile=None,
                 source=None, output=None, ignore=None, label=None,
-                per_app: int = PER_APP) -> dict:
+                per_app: int = PER_APP, mappings: str | None = None) -> dict:
     ls, rs, filt = _sides(root, left, right, profile, source, output)
     ign = {s.strip().lower() for s in (ignore or pairing.DEFAULT_IGNORE) if s.strip()}
     ign |= {s.lower() for s in (source, output) if s}
 
     idx = pairing.build(ls, rs, ignore=ignore, **filt)
 
+    def _bytes(store, key):
+        try:
+            return store.size(key) if key else 0
+        except Exception:  # noqa: BLE001
+            return 0
+
     rows = [
         {"id": n, "left": p["left"], "right": p["right"], "how": p["how"],
+         # Off the listing, which already carried it -- no extra call. What a
+         # folder weighs is how you tell a mailbox from a drive full of
+         # scanned PDFs, and it is the difference between "100 files" meaning
+         # ten minutes and meaning an afternoon.
+         "lb": _bytes(ls, p["left"]), "rb": _bytes(rs, p["right"]),
          "label": "/".join(pairing.normalise(p["left"], ign))}
         for n, p in enumerate(idx["pairs"])
     ]
@@ -1471,6 +1612,7 @@ def open_review(root=None, left=None, right=None, profile=None,
     if not partial:
         for lp in idx["unmatched_left"]:
             rows.append({"id": len(rows), "left": lp, "right": None, "how": "missing",
+                         "lb": _bytes(ls, lp), "rb": 0,
                          "label": "/".join(pairing.normalise(lp, ign))})
     rows.sort(key=lambda r: r["label"])
     rows, thinned = _thin(rows, per_app)
@@ -1484,8 +1626,16 @@ def open_review(root=None, left=None, right=None, profile=None,
     marks = _migrate(all_marks.setdefault(sid, {}))
     all_marks[sid] = marks
 
+    map_spec, map_store, map_inner = mappings, None, None
+    if not map_spec:
+        inner = find_mappings(rs)
+        if inner:
+            map_spec, map_store, map_inner = f"{rs}/{inner}", rs, inner
+
     with _LOCK:
         S.update(ready=True, rows=rows, left_store=ls, right_store=rs,
+                 profile=profile, map_spec=map_spec, map_store=map_store,
+                 map_inner=map_inner,
                  sid=sid, all_marks=all_marks, marks=marks,
                  left=f"{ls}{'/' + source if source else ''}",
                  right=f"{rs}{'/' + output if output else ''}")
@@ -1566,6 +1716,7 @@ def open_review(root=None, left=None, right=None, profile=None,
                "left": S["left"], "right": S["right"], "hint": hint,
                "scope_note": scope_note,
                "thinned": thinned, "partial": partial, "per_app": per_app,
+               "has_map": bool(map_spec),
                "left_short": short(ls, source), "right_short": short(rs, output),
                "source": source, "output": output, "root": root,
                # What the browser tab is named. Two tabs on two batches are
@@ -1635,6 +1786,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 out.update(S.get("session", {}))
             out["render"] = RENDER.available
             return self._json(out)
+        if path == "/api/mappings":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                src = S.get("map_spec")
+                if not src:
+                    return self._json({"error": "no mapping database for this run. "
+                                                "Point at one with --mappings."})
+                out = read_mappings(src, S.get("profile"),
+                                    S.get("map_store"), S.get("map_inner"))
+            except Exception as exc:  # noqa: BLE001 -- shown in the panel
+                return self._json({"error": f"{type(exc).__name__}: {exc}"[:200]})
+            look = (q.get("q") or [""])[0].strip().lower()
+            rows = out["rows"]
+            if look:
+                rows = [r for r in rows
+                        if look in str(r.get("original", "")).lower()
+                        or look in str(r.get("replacement", "")).lower()
+                        or look in str(r.get("attribute_type", "")).lower()]
+            # Capped like everything else here: 30,000 rows of substitution is
+            # not something anyone reads, and the search is how you use it.
+            return self._json({"path": out["path"], "count": out["count"],
+                               "shown": rows[:400], "matched": len(rows),
+                               "types": sorted({str(r.get("attribute_type") or "?")
+                                                for r in out["rows"]})})
         if path.startswith("/api/metrics/"):
             try:
                 return self._json(metrics(path.rsplit("/", 1)[1]))
@@ -1735,6 +1910,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     source=(body.get("source") or "").strip() or None,
                     output=(body.get("output") or "").strip() or None,
                     label=(body.get("label") or "").strip() or None,
+                    mappings=(body.get("mappings") or "").strip() or None,
                 ))
             except Exception as exc:  # noqa: BLE001 -- surfaced in the popup
                 return self._json({"error": f"{type(exc).__name__}: {exc}"})
@@ -1894,6 +2070,8 @@ def main():
     ap.add_argument("--output", help="folder name of the output half inside root")
     ap.add_argument("--profile", help="AWS profile for S3 locations")
     ap.add_argument("--label", help="what to call this batch in the tab title")
+    ap.add_argument("--mappings", help="pii_mappings.db to inspect, if the run "
+                                       "did not ship one next to its output")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-open", action="store_true")
     a = ap.parse_args()
@@ -1920,7 +2098,7 @@ def main():
             print(f"  note: {guess['warn']}", flush=True)
     if a.root or (a.left and a.right):
         open_review(root=a.root, left=a.left, right=a.right, profile=a.profile,
-                    label=a.label,
+                    label=a.label, mappings=a.mappings,
                     source=a.source, output=a.output)
 
     url = f"http://127.0.0.1:{a.port}/"
