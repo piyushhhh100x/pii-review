@@ -196,6 +196,49 @@ class AlignBySize(unittest.TestCase):
         self.assertEqual(len(idx["pairs"]), 1)
 
 
+class PerReviewerSample(unittest.TestCase):
+    """Two people on one run should not spend the day on the same hundred."""
+
+    def rows(self, n):
+        return [{"label": f"gmail/f{i:04}.txt", "id": i} for i in range(n)]
+
+    def test_the_same_machine_gets_the_same_files_every_time(self):
+        # A refresh, a restart or a fresh checkout must put the same files
+        # back. Verdicts are keyed by path; a sample that moved would strand
+        # yesterday's review.
+        a, _ = review._thin(self.rows(500), 20, "laptop-A")
+        b, _ = review._thin(self.rows(500), 20, "laptop-A")
+        self.assertEqual([r["label"] for r in a], [r["label"] for r in b])
+
+    def test_two_machines_get_different_files(self):
+        a, _ = review._thin(self.rows(500), 20, "laptop-A")
+        b, _ = review._thin(self.rows(500), 20, "laptop-B")
+        A, B = {r["label"] for r in a}, {r["label"] for r in b}
+        self.assertNotEqual(A, B)
+        # Not merely different -- barely overlapping, or two reviewers buy
+        # very little coverage between them.
+        self.assertLess(len(A & B), 8)
+
+    def test_a_shared_seed_reproduces_a_colleagues_sample(self):
+        # For "show me exactly what you were looking at".
+        a, _ = review._thin(self.rows(500), 20, "shared")
+        b, _ = review._thin(self.rows(500), 20, "shared")
+        self.assertEqual([r["label"] for r in a], [r["label"] for r in b])
+
+    def test_the_salt_is_written_once_and_reused(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        old = review.SALT_FILE
+        review.SALT_FILE = Path(d) / "salt"
+        self.addCleanup(setattr, review, "SALT_FILE", old)
+        first = review.reviewer_salt()
+        self.assertTrue(review.SALT_FILE.exists())
+        self.assertEqual(first, review.reviewer_salt())
+
+    def test_an_override_wins_over_the_stored_salt(self):
+        self.assertEqual(review.reviewer_salt("someone-else"), "someone-else")
+
+
 class Mappings(unittest.TestCase):
     """The run's substitution table, readable without a sqlite shell."""
 
@@ -259,12 +302,12 @@ class Thinning(unittest.TestCase):
         return [{"label": f"{app}/f{i:04}.txt", "id": i} for i in range(n)]
 
     def test_a_small_app_is_left_alone(self):
-        kept, dropped = review._thin(self.rows("gmail", 30), 100)
+        kept, dropped = review._thin(self.rows("gmail", 30), 100, "s")
         self.assertEqual(len(kept), 30)
         self.assertEqual(dropped, {})
 
     def test_a_big_app_is_cut_to_the_cap(self):
-        kept, dropped = review._thin(self.rows("gmail", 900), 100)
+        kept, dropped = review._thin(self.rows("gmail", 900), 100, "s")
         self.assertEqual(len(kept), 100)
         self.assertEqual(dropped, {"gmail": 800})
 
@@ -272,7 +315,7 @@ class Thinning(unittest.TestCase):
         # One budget spent top-down goes entirely to whichever app sorts
         # first and shows none of the rest.
         rows = self.rows("gmail", 500) + self.rows("google_drive", 500)
-        kept, _ = review._thin(rows, 100)
+        kept, _ = review._thin(rows, 100, "s")
         got = {}
         for r in kept:
             got[r["label"].split("/")[0]] = got.get(r["label"].split("/")[0], 0) + 1
@@ -281,19 +324,19 @@ class Thinning(unittest.TestCase):
     def test_it_is_not_just_the_first_hundred(self):
         # S3 hands back keys in sort order, so the head of the list is always
         # the same corner of the same export.
-        kept, _ = review._thin(self.rows("gmail", 900), 100)
+        kept, _ = review._thin(self.rows("gmail", 900), 100, "s")
         self.assertNotEqual([r["label"] for r in kept],
                             [r["label"] for r in self.rows("gmail", 900)[:100]])
 
     def test_the_same_run_thins_to_the_same_files(self):
         # Verdicts are keyed by path. A sample that reshuffled on reopen would
         # strand yesterday's review against files nobody can see today.
-        a, _ = review._thin(self.rows("gmail", 900), 100)
-        b, _ = review._thin(self.rows("gmail", 900), 100)
+        a, _ = review._thin(self.rows("gmail", 900), 100, "s")
+        b, _ = review._thin(self.rows("gmail", 900), 100, "s")
         self.assertEqual([r["label"] for r in a], [r["label"] for r in b])
 
     def test_zero_means_no_thinning(self):
-        kept, dropped = review._thin(self.rows("gmail", 900), 0)
+        kept, dropped = review._thin(self.rows("gmail", 900), 0, "s")
         self.assertEqual(len(kept), 900)
         self.assertEqual(dropped, {})
 

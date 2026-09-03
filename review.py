@@ -16,6 +16,7 @@ import http.server
 import io
 import json
 import mimetypes
+import os
 import random
 import re
 import socketserver
@@ -1544,7 +1545,44 @@ def inspect_root(root: str, profile: str | None) -> dict:
 PER_APP = 100
 
 
-def _thin(rows, per_app: int):
+#: Where this laptop's sampling salt lives. In the home directory rather than
+#: beside the code, so it survives re-cloning the repo and stays one identity
+#: per machine rather than one per checkout.
+SALT_FILE = Path.home() / ".pii-review-salt"
+
+
+def reviewer_salt(override: str | None = None) -> str:
+    """A value unique to this machine, stable forever, used to pick the sample.
+
+    Two people reviewing the same run should not both spend their afternoon on
+    the same hundred documents -- between them they should cover two hundred.
+    Seeding the sample on something per-machine gets that for free, with no
+    coordination, no server, and nobody assigning work.
+
+    Written down rather than derived from the hostname, because it has to
+    survive a rename and a re-clone: the whole point is that a refresh, a
+    restart or a fresh checkout puts the SAME files back in front of the same
+    person. Verdicts are keyed by path, and a sample that moved would strand
+    yesterday's review.
+    """
+    if override:
+        return override.strip()
+    try:
+        got = SALT_FILE.read_text().strip()
+        if got:
+            return got
+    except OSError:
+        pass
+    made = hashlib.sha256(os.urandom(32)).hexdigest()[:16]
+    try:
+        SALT_FILE.write_text(made + "\n")
+        SALT_FILE.chmod(0o600)
+    except OSError:  # noqa: BLE001 -- read-only home; the sample is then per-run
+        pass
+    return made
+
+
+def _thin(rows, per_app: int, salt: str = ""):
     """At most ``per_app`` pairs per app folder, chosen at random.
 
     Per app, not per run: a single budget spent top-down would go entirely to
@@ -1555,10 +1593,11 @@ def _thin(rows, per_app: int):
     the same corner of the same export every time, with whole categories of
     defect never on screen.
 
-    Seeded on the app name, so the same run thins to the same files every time
-    it is opened. Verdicts in marks.json are keyed by path, and a sample that
-    reshuffled on reopen would strand yesterday's review against files nobody
-    can see today.
+    Seeded on the app name AND this machine's salt, so the same run thins to
+    the same files every time it is opened here, and to a different hundred on
+    a colleague's laptop. Verdicts in marks.json are keyed by path, and a
+    sample that reshuffled on reopen would strand yesterday's review against
+    files nobody can see today.
     """
     if not per_app:
         return rows, {}
@@ -1571,14 +1610,15 @@ def _thin(rows, per_app: int):
             kept += group
             continue
         dropped[app] = len(group) - per_app
-        kept += random.Random(app).sample(group, per_app)
+        kept += random.Random(f"{salt}\x00{app}").sample(group, per_app)
     kept.sort(key=lambda r: r["label"])
     return kept, dropped
 
 
 def open_review(root=None, left=None, right=None, profile=None,
                 source=None, output=None, ignore=None, label=None,
-                per_app: int = PER_APP, mappings: str | None = None) -> dict:
+                per_app: int = PER_APP, mappings: str | None = None,
+                seed: str | None = None) -> dict:
     ls, rs, filt = _sides(root, left, right, profile, source, output)
     ign = {s.strip().lower() for s in (ignore or pairing.DEFAULT_IGNORE) if s.strip()}
     ign |= {s.lower() for s in (source, output) if s}
@@ -1615,7 +1655,8 @@ def open_review(root=None, left=None, right=None, profile=None,
                          "lb": _bytes(ls, lp), "rb": 0,
                          "label": "/".join(pairing.normalise(lp, ign))})
     rows.sort(key=lambda r: r["label"])
-    rows, thinned = _thin(rows, per_app)
+    salt = reviewer_salt(seed)
+    rows, thinned = _thin(rows, per_app, salt)
     for n, r in enumerate(rows):
         r["id"] = n
 
@@ -1664,7 +1705,8 @@ def open_review(root=None, left=None, right=None, profile=None,
     if thinned:
         named = ", ".join(f"{a}/ ({n} more)" for a, n in
                           sorted(thinned.items(), key=lambda t: -t[1])[:4])
-        print(f"  showing {per_app} per app — not shown: {named}", flush=True)
+        print(f"  showing {per_app} per app (sample {salt[:6]}) — "
+              f"not shown: {named}", flush=True)
 
     units = {} if partial else (idx.get("out_of_scope_units") or {})
     scope_note = None
@@ -1716,6 +1758,7 @@ def open_review(root=None, left=None, right=None, profile=None,
                "left": S["left"], "right": S["right"], "hint": hint,
                "scope_note": scope_note,
                "thinned": thinned, "partial": partial, "per_app": per_app,
+               "sample": salt[:6],
                "has_map": bool(map_spec),
                "left_short": short(ls, source), "right_short": short(rs, output),
                "source": source, "output": output, "root": root,
@@ -1911,6 +1954,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     output=(body.get("output") or "").strip() or None,
                     label=(body.get("label") or "").strip() or None,
                     mappings=(body.get("mappings") or "").strip() or None,
+                    seed=(body.get("seed") or "").strip() or None,
                 ))
             except Exception as exc:  # noqa: BLE001 -- surfaced in the popup
                 return self._json({"error": f"{type(exc).__name__}: {exc}"})
@@ -1982,7 +2026,10 @@ def _fan_out(jobs, a) -> int:
             cmd.append(job["root"])
         else:
             cmd += ["--left", job["left"], "--right", job["right"]]
-        for flag in ("profile", "source", "output"):
+        # seed and mappings belong here too, or a fan-out of three reviews
+        # would sample each one off this machine's own salt while the single
+        # -review path honoured --seed. Same command, two behaviours.
+        for flag in ("profile", "source", "output", "mappings", "seed"):
             if getattr(a, flag, None):
                 cmd += [f"--{flag}", getattr(a, flag)]
         cmd += ["--label", job["label"]]
@@ -2072,6 +2119,9 @@ def main():
     ap.add_argument("--label", help="what to call this batch in the tab title")
     ap.add_argument("--mappings", help="pii_mappings.db to inspect, if the run "
                                        "did not ship one next to its output")
+    ap.add_argument("--seed", help="sample to use instead of this machine's own. "
+                                   "Pass a colleague's to review exactly what "
+                                   "they are reviewing.")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-open", action="store_true")
     a = ap.parse_args()
@@ -2098,7 +2148,7 @@ def main():
             print(f"  note: {guess['warn']}", flush=True)
     if a.root or (a.left and a.right):
         open_review(root=a.root, left=a.left, right=a.right, profile=a.profile,
-                    label=a.label, mappings=a.mappings,
+                    label=a.label, mappings=a.mappings, seed=a.seed,
                     source=a.source, output=a.output)
 
     url = f"http://127.0.0.1:{a.port}/"

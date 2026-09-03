@@ -119,6 +119,19 @@ personal mobile is a leak. So is the opposite: a toll-free number, a column
 heading or a product name that got scrubbed. A right pane identical to the
 left means the redaction never ran; a blank one means it broke.
 
+Two people on the same run get different files. The sample is seeded on a salt
+kept in `~/.pii-review-salt`, written once per machine — so your files stay the
+same across refreshes and re-clones, and your colleague's hundred is a
+different hundred. On one real export two reviewers covered 631 files between
+them instead of 340.
+
+To review exactly what someone else is reviewing, pass their sample id (it is
+printed on startup and shown in the header):
+
+```
+./review --pair SRC OUT --profile sail --seed 256028
+```
+
 Press `m` for the run's mapping table: every original the pipeline found, what
 it replaced it with, and the ones it found and left alone. Searchable, which
 is the only way to use thirty thousand substitutions. It is picked up from
