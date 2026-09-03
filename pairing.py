@@ -159,6 +159,13 @@ def out_of_scope(left_dirs, right_dirs):
         for n in range(1, len(d) + 1):
             prefixes.add(d[:n])
 
+    # Names the source uses at each level, so a level that was RENAMED can be
+    # told apart from a branch that was skipped.
+    siblings: dict[tuple, set] = {}
+    for d in left_dirs:
+        for n in range(len(d)):
+            siblings.setdefault(d[:n], set()).add(d[n])
+
     dropped: dict[str, list] = {}
     for d in left_dirs:
         k = 0
@@ -169,6 +176,20 @@ def out_of_scope(left_dirs, right_dirs):
         # The output must actually branch here, or "absent" means nothing --
         # it just means the trees diverge at this point for both halves.
         if not any(len(pre) == k + 1 and pre[:k] == d[:k] for pre in prefixes):
+            continue
+        # A level the pipeline RENAMES is not a level it skipped. The identity
+        # folder is itself redacted -- google_calendar/anirudh.trivedi@inc42.com
+        # ships as google_calendar/cyniria.selridge@example.com -- so EVERY
+        # source name at that level is absent from the output, and reading that
+        # as "none of these were in the run" silently deleted whole apps from
+        # the review. One matching sibling means the level's names carry over
+        # and an absent one really was skipped; none matching means they were
+        # all rewritten, and nothing here can be judged out of scope.
+        here = siblings.get(d[:k], set())
+        carried = {seg for seg in here
+                   if any(len(pre) == k + 1 and pre[:k] == d[:k] and pre[k] == seg
+                          for pre in prefixes)}
+        if not carried:
             continue
         dropped.setdefault("/".join(d[:k + 1]), []).append(d)
     return dropped

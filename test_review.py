@@ -112,6 +112,34 @@ class Formatting(unittest.TestCase):
         self.assertLess(out["html"].count('class=rec>'), 900)
 
 
+class RenamedLevels(unittest.TestCase):
+    """A level the pipeline renames is not a level it skipped.
+
+    The identity folder is itself redacted, so every source name at that level
+    is absent from the output. Read as "none of these were in the run", that
+    silently deleted whole apps from the review -- google_calendar went from
+    26 documents to 1.
+    """
+
+    def test_a_renamed_identity_level_drops_nothing(self):
+        left = {("google_calendar", "anirudh.trivedi@inc42.com", "events"),
+                ("google_calendar", "amit.kumar@inc42.com", "events")}
+        right = {("google_calendar", "cyniria.selridge@example.com", "events")}
+        self.assertEqual(pairing.out_of_scope(left, right), {})
+
+    def test_a_genuinely_skipped_unit_is_still_caught(self):
+        # Names carry over here, so an absent one really was not in the run.
+        left = {("jira", "nx-004", "shared"), ("jira", "nx-005", "shared")}
+        right = {("jira", "nx-004", "shared")}
+        self.assertEqual(list(pairing.out_of_scope(left, right)), ["jira/nx-005"])
+
+    def test_one_surviving_sibling_is_enough_to_judge_the_rest(self):
+        left = {("app", "a"), ("app", "b"), ("app", "c")}
+        right = {("app", "a")}
+        self.assertEqual(sorted(pairing.out_of_scope(left, right)),
+                         ["app/b", "app/c"])
+
+
 class Thinning(unittest.TestCase):
     """A hundred pairs per app, chosen at random, stable across reopens."""
 
