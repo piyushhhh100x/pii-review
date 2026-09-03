@@ -132,7 +132,8 @@ printed on startup and shown in the header):
 ./review --pair SRC OUT --profile sail --seed 256028
 ```
 
-Press `m` for the run's mapping table: every original the pipeline found, what
+Press `m`, or the **PII-mappings** button in the header, for the run's
+mapping table: every original the pipeline found, what
 it replaced it with, and the ones it found and left alone. Searchable, which
 is the only way to use thirty thousand substitutions. It is picked up from
 `_pii/pii_mappings.db` beside the output if the run shipped one, otherwise
