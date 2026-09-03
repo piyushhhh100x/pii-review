@@ -21,6 +21,9 @@ DOC_EXTS = {
     ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".csv", ".tsv",
     ".txt", ".md", ".json", ".jsonl", ".xml", ".html", ".htm", ".eml",
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg",
+    # Plain-text carriers the renderer already handles. Listing lagged behind
+    # it, so a leak in a .sql dump or a .env was invisible in review.
+    ".log", ".yaml", ".yml", ".ini", ".cfg", ".sql", ".vcf", ".ics", ".env",
 }
 
 #: macOS zip cruft and VCS. Pipeline bookkeeping is caught by the underscore

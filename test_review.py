@@ -49,6 +49,72 @@ class Docs(unittest.TestCase):
         self.assertFalse(stores.is_doc("a/pii_mappings.db"))
 
 
+class Viewing(unittest.TestCase):
+    """view() must never hand a document to the browser to save.
+
+    Every one of these was a live download dialog: the pane went blank and the
+    file landed in ~/Downloads instead, twice per refresh, once per side.
+    """
+
+    def test_a_huge_cell_still_renders_as_a_table(self):
+        # A Discord/Google takeout row packs a whole JSON blob into one field.
+        # csv caps a field at 128 KB and raises past it, which used to drop the
+        # file onto the raw byte route.
+        blob = "x" * 200_000
+        data = f'id,data\n1,"{blob}"\n'.encode()
+        out = review.view("users.csv", data)
+        self.assertEqual(out["kind"], "table")
+
+    def test_the_csv_field_limit_is_left_as_it_was_found(self):
+        import csv
+        before = csv.field_size_limit()
+        review.view("users.csv", b'a,b\n1,"' + b"x" * 200_000 + b'"\n')
+        self.assertEqual(csv.field_size_limit(), before)
+
+    def test_an_unlisted_text_format_is_sniffed_not_downloaded(self):
+        out = review.view("export.ndjson", b'{"email":"a@b.com"}\n{"email":"c@d.com"}\n')
+        self.assertEqual(out["kind"], "text")
+        self.assertIn("a@b.com", out["html"])
+
+    def test_binary_is_not_mistaken_for_text(self):
+        self.assertEqual(review.view("blob.bin", b"\x00\x01\x02rubbish")["kind"], "other")
+
+    def test_an_unshowable_document_says_why(self):
+        out = review.view("contract.doc", b"\xd0\xcf\x11\xe0" + b"\x00" * 64)
+        self.assertEqual(out["kind"], "other")
+        self.assertIn("docx", out["why"])
+
+    def test_a_broken_workbook_reports_instead_of_downloading(self):
+        out = review.view("book.xlsx", b"not a zip at all")
+        self.assertEqual(out["kind"], "other")
+        self.assertTrue(out["why"])
+
+    def test_slides_are_read_in_slide_order(self):
+        import io as _io
+        def slide(text):
+            A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+            P = "http://schemas.openxmlformats.org/presentationml/2006/main"
+            return (f'<p:sld xmlns:p="{P}" xmlns:a="{A}">'
+                    f'<a:p><a:t>{text}</a:t></a:p></p:sld>').encode()
+        buf = _io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            for n, t in ((1, "first"), (2, "second"), (10, "tenth")):
+                z.writestr(f"ppt/slides/slide{n}.xml", slide(t))
+        out = review.view("deck.pptx", buf.getvalue())
+        self.assertEqual(out["kind"], "text")
+        body = out["html"]
+        self.assertLess(body.index("second"), body.index("tenth"))
+
+    def test_the_viewer_never_falls_through_to_an_iframe(self):
+        # "other" is a card the page draws. "raw" is the PDF plugin. Those are
+        # the only two non-rendered kinds, and view() must not invent a third.
+        for name, data in (("a.txt", b"hello"), ("a.csv", b"a,b\n1,2\n"),
+                           ("a.png", b"\x89PNG"), ("a.pdf", b"%PDF-1.4"),
+                           ("a.weird", b"\xff\xfe\x00\x01")):
+            self.assertIn(review.view(name, data)["kind"],
+                          {"table", "text", "image", "pdf", "other"}, name)
+
+
 class Layout(unittest.TestCase):
     def test_layout_segments_drop_out_of_the_key(self):
         ign = set(pairing.DEFAULT_IGNORE)
