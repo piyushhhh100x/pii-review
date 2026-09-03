@@ -140,6 +140,62 @@ class RenamedLevels(unittest.TestCase):
                          ["app/b", "app/c"])
 
 
+class AlignBySize(unittest.TestCase):
+    """Same-shape folders told apart by how many bytes are in them."""
+
+    def build(self, files, **kw):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        tree(Path(d), files)
+        st = stores.open_store(d)
+        return pairing.build(st, st, **kw)
+
+    def test_two_people_with_the_same_shape_are_matched_by_size(self):
+        # Both have one page. Only the byte counts say which is which.
+        idx = self.build({
+            "u/raw/ann/page_000001.jsonl": b"a" * 900,
+            "u/raw/bob/page_000001.jsonl": b"b" * 100,
+            "u/out/xxx/page_000001.jsonl": b"A" * 890,   # ann
+            "u/out/yyy/page_000001.jsonl": b"B" * 104,   # bob
+        }, left_only="raw", right_only="out")
+        got = {p["left"].split("/")[2]: p["right"].split("/")[2] for p in idx["pairs"]}
+        self.assertEqual(got, {"ann": "xxx", "bob": "yyy"})
+
+    def test_sizes_too_close_to_call_are_left_unpaired(self):
+        # No margin between the candidates, so there is no evidence. Pairing
+        # the wrong two puts one person's source beside another's output and
+        # every difference then reads as a leak.
+        idx = self.build({
+            "u/raw/ann/page_000001.jsonl": b"a" * 500,
+            "u/raw/bob/page_000001.jsonl": b"b" * 500,
+            "u/out/xxx/page_000001.jsonl": b"A" * 500,
+            "u/out/yyy/page_000001.jsonl": b"B" * 500,
+        }, left_only="raw", right_only="out")
+        self.assertEqual(idx["pairs"], [])
+
+    def test_a_wildly_different_size_is_not_forced(self):
+        # Three folders a side, so shape alone cannot pick. ann has no
+        # plausible counterpart by size and stays unpaired while the others
+        # match.
+        idx = self.build({
+            "u/raw/ann/page_000001.jsonl": b"a" * 100000,
+            "u/raw/bob/page_000001.jsonl": b"b" * 500,
+            "u/raw/cid/page_000001.jsonl": b"c" * 20,
+            "u/out/xxx/page_000001.jsonl": b"A" * 505,   # bob
+            "u/out/yyy/page_000001.jsonl": b"B" * 21,    # cid
+        }, left_only="raw", right_only="out")
+        got = {p["left"].split("/")[2]: p["right"].split("/")[2] for p in idx["pairs"]}
+        self.assertEqual(got, {"bob": "xxx", "cid": "yyy"})
+        self.assertNotIn("ann", got)
+
+    def test_one_folder_each_side_still_matches_on_shape_alone(self):
+        # Nothing to be ambiguous about, so size is not consulted.
+        idx = self.build({"u/raw/ann/only.pdf": b"a" * 900,
+                          "u/out/xxx/only.pdf": b"A" * 20},
+                         left_only="raw", right_only="out")
+        self.assertEqual(len(idx["pairs"]), 1)
+
+
 class Thinning(unittest.TestCase):
     """A hundred pairs per app, chosen at random, stable across reopens."""
 
