@@ -46,6 +46,64 @@ never overwrite each other.
 Use `--pair` when the two halves are siblings rather than nested. Ctrl-C stops
 all of them.
 
+## S3: getting in
+
+Every S3 location needs `--profile`. Which one depends on who owns the bucket —
+a client bucket is usually a different AWS account from your own, and your SSO
+login does not reach it. Two ways in.
+
+**SSO, for accounts on your own start URL:**
+
+```
+aws sso login --profile sail
+./review s3://bucket/prefix --profile sail
+```
+
+To see which accounts that login actually covers — buckets outside them will
+fail no matter how many times you re-login:
+
+```
+aws sso list-accounts --region us-west-2 --access-token \
+  "$(jq -r 'select(.accessToken)|.accessToken' ~/.aws/sso/cache/*.json | head -1)"
+```
+
+Add a profile per account to `~/.aws/config`:
+
+```ini
+[profile some-client]
+sso_session    = sail
+sso_account_id = 111122223333
+sso_role_name  = SomeRole
+region         = ap-south-1
+```
+
+**Access keys, for a client account you were handed credentials for.**
+Put them in `~/.aws/credentials` — never in a command, a script, or this repo:
+
+```ini
+[some-client]
+aws_access_key_id     = AKIA...
+aws_secret_access_key = ...
+```
+
+```
+chmod 600 ~/.aws/credentials
+aws sts get-caller-identity --profile some-client    # confirms which account
+./review s3://client-bucket/their-export --profile some-client
+```
+
+**If it will not open**, run the listing by hand — the error names the missing
+permission, and `AccessDenied` on `s3:ListBucket` is not something this tool
+can work around:
+
+```
+aws s3 ls s3://bucket/prefix/ --profile some-client
+```
+
+Listing is what builds the index, so read access alone is not enough. Ask for
+`s3:ListBucket` and `s3:GetObject` on that bucket, or for credentials in the
+account that owns it.
+
 Python 3.9+, standard library only. Nothing is installed. PDFs scroll in step
 if PyMuPDF is importable by any interpreter on the box; without it they fall
 back to the browser's viewer.
