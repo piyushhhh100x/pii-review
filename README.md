@@ -133,7 +133,8 @@ printed on startup and shown in the header):
 ```
 
 Press `m`, or the **PII-mappings** button in the header, for the run's
-mapping table: every original the pipeline found, what
+mapping table, grouped by attribute type with a sample of each, `show more`
+per type, search across all of them, and a comment you can leave on any row: every original the pipeline found, what
 it replaced it with, and the ones it found and left alone. Searchable, which
 is the only way to use thirty thousand substitutions. It is picked up from
 `_pii/pii_mappings.db` beside the output if the run shipped one, otherwise
