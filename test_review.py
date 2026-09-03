@@ -197,75 +197,67 @@ class AlignBySize(unittest.TestCase):
 
 
 class MappingPanel(unittest.TestCase):
-    """Grouped by type, sampled inside each, paginated per type."""
+    """The run's substitution table, browsed like a database."""
 
     def rows(self, spec):
-        out = []
-        for kind, n in spec.items():
-            out += [{"attribute_type": kind, "original": f"{kind}-{i:04}",
-                     "replacement": f"fake-{i}"} for i in range(n)]
-        return out
+        return [{"attribute_type": k, "original": f"{k}-{n:04d}",
+                 "replacement": f"x{n}"}
+                for k, c in spec.items() for n in range(c)]
 
-    def test_every_type_is_on_screen_from_the_first_paint(self):
-        # A flat list ordered by type is a screen of "aadhaar" and never
-        # reaches the rest -- 51,997 emails would bury 22 aadhaars.
-        g = review.grouped_mappings(self.rows({"aadhaar": 22, "email": 51997}),
-                                    "s", 8, {})
-        self.assertEqual([x["type"] for x in g], ["aadhaar", "email"])
-        self.assertEqual([x["shown"] for x in g], [8, 8])
-        self.assertEqual([x["total"] for x in g], [22, 51997])
+    def test_every_type_comes_back_with_its_real_count(self):
+        # The sidebar is the index into a hundred thousand rows. A count that
+        # reflected the page rather than the type would make it useless.
+        out = review.browse_mappings(self.rows({"aadhaar": 22, "email": 51997}))
+        self.assertEqual([t["type"] for t in out["types"]], ["aadhaar", "email"])
+        self.assertEqual([t["total"] for t in out["types"]], [22, 51997])
 
-    def test_a_type_smaller_than_the_page_is_not_padded(self):
-        g = review.grouped_mappings(self.rows({"ifsc": 3}), "s", 8, {})
-        self.assertEqual(g[0]["shown"], 3)
+    def test_selecting_a_type_pages_only_that_type(self):
+        rows = self.rows({"email": 500, "ifsc": 3})
+        out = review.browse_mappings(rows, kind="ifsc")
+        self.assertEqual(out["total"], 3)
+        self.assertTrue(all(r["attribute_type"] == "ifsc" for r in out["rows"]))
+        # The sidebar still shows everything, or you cannot get back out.
+        self.assertEqual(len(out["types"]), 2)
 
-    def test_show_more_extends_one_type_only(self):
-        g = review.grouped_mappings(self.rows({"email": 500, "ifsc": 500}),
-                                    "s", 8, {"email": 33})
-        got = {x["type"]: x["shown"] for x in g}
-        self.assertEqual(got, {"email": 33, "ifsc": 8})
+    def test_nothing_is_sampled_away(self):
+        # Documents are sampled because nobody reads 34,000 of them. This is
+        # the table the reviewer is checking, so a row that exists has to be
+        # reachable -- every one of them, in order, by paging.
+        rows = self.rows({"email": 450})
+        seen = []
+        off = 0
+        while True:
+            out = review.browse_mappings(rows, offset=off, limit=200)
+            seen += [r["original"] for r in out["rows"]]
+            off += len(out["rows"])
+            if off >= out["total"]:
+                break
+        self.assertEqual(seen, [r["original"] for r in rows])
 
-    def test_show_more_extends_rather_than_reshuffles(self):
+    def test_paging_is_stable_and_does_not_overlap(self):
         rows = self.rows({"email": 500})
-        first = review.grouped_mappings(rows, "s", 8, {})[0]["rows"]
-        more = review.grouped_mappings(rows, "s", 8, {"email": 33})[0]["rows"]
-        self.assertEqual([r["original"] for r in first],
-                         [r["original"] for r in more[:8]])
-
-    def test_it_samples_rather_than_taking_the_head(self):
-        rows = self.rows({"email": 500})
-        got = review.grouped_mappings(rows, "s", 8, {})[0]["rows"]
-        self.assertNotEqual([r["original"] for r in got],
-                            [r["original"] for r in rows[:8]])
-
-    def test_two_reviewers_see_different_mappings(self):
-        rows = self.rows({"email": 500})
-        a = review.grouped_mappings(rows, "laptop-A", 8, {})[0]["rows"]
-        b = review.grouped_mappings(rows, "laptop-B", 8, {})[0]["rows"]
-        self.assertNotEqual([r["original"] for r in a], [r["original"] for r in b])
+        a = review.browse_mappings(rows, offset=0, limit=200)["rows"]
+        b = review.browse_mappings(rows, offset=200, limit=200)["rows"]
+        self.assertEqual(len(set(r["original"] for r in a + b)), 400)
+        self.assertEqual(a, review.browse_mappings(rows, offset=0, limit=200)["rows"])
 
     def test_search_spans_every_type(self):
-        rows = self.rows({"email": 10, "ifsc": 10})
-        g = review.grouped_mappings(rows, "s", 8, {}, look="-0003")
-        self.assertEqual(sorted(x["type"] for x in g), ["email", "ifsc"])
-        self.assertEqual([x["total"] for x in g], [1, 1])
+        rows = self.rows({"email": 20, "ifsc": 20})
+        out = review.browse_mappings(rows, look="-0003")
+        self.assertEqual({t["type"] for t in out["types"]}, {"email", "ifsc"})
+        self.assertEqual(out["matched"], 2)
 
-    def test_search_matches_the_replacement_too(self):
-        rows = [{"attribute_type": "email", "original": "a@b.com",
-                 "replacement": "zzz@q.com"}]
-        self.assertEqual(len(review.grouped_mappings(rows, "s", 8, {}, "zzz")), 1)
+    def test_search_inside_a_selected_type(self):
+        rows = self.rows({"email": 20, "ifsc": 20})
+        out = review.browse_mappings(rows, kind="email", look="-0003")
+        self.assertEqual(out["total"], 1)
+        # ...and still reports that the other type has a hit, so the sidebar
+        # does not hide it.
+        self.assertEqual(out["matched"], 2)
 
-    def test_a_key_survives_punctuation_and_a_rerun(self):
-        # Hashed, not "type\x00original": the raw pair carries a NUL and
-        # whatever the original had in it. And not the rowid, which a re-run
-        # renumbers -- a comment adrift from its mapping is worse than none.
-        a = review.map_key({"attribute_type": "email", "original": "x'\"@b.com"})
-        b = review.map_key({"attribute_type": "email", "original": "x'\"@b.com"})
-        self.assertEqual(a, b)
-        self.assertTrue(a.isalnum())
-        self.assertNotEqual(a, review.map_key(
-            {"attribute_type": "full_name", "original": "x'\"@b.com"}))
-
+    def test_a_search_that_matches_nothing_says_so(self):
+        out = review.browse_mappings(self.rows({"email": 5}), look="zzz")
+        self.assertEqual((out["total"], out["types"]), (0, []))
 
 class PerReviewerSample(unittest.TestCase):
     """Two people on one run should not spend the day on the same hundred."""
