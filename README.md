@@ -127,9 +127,10 @@ Press `n`, or **Folder-names**, for what the pipeline did to the folder names
 themselves. A folder is part of the deliverable too:
 `gmail/anirudh.trivedi@inc42.com/messages/page_000001.jsonl` names a person and
 their employer in the object key however clean the two panes look, and neither
-pane shows it. The panel lists every folder beside what it became, and puts the
-ones that read as personal data and did NOT change at the top. The folder each
-document sits in is also printed above its pane, source against output.
+pane shows it. The panel is one table — every folder, its name in the source, its name in the
+output — searchable. A name the output kept that reads as personal data is
+tinted. The folder each document sits in is also printed above its pane,
+source against output.
 
 Two people on the same run get different files. The sample is seeded on a salt
 kept in `~/.pii-review-salt`, written once per machine — so your files stay the
@@ -144,11 +145,11 @@ printed on startup and shown in the header):
 ./review --pair SRC OUT --profile sail --seed 256028
 ```
 
-Press `m`, or the **PII-mappings** button in the header, for the run's
-mapping table, grouped by attribute type with a sample of each, `show more`
-per type, search across all of them, and a comment you can leave on any row: every original the pipeline found, what
-it replaced it with, and the ones it found and left alone. Searchable, which
-is the only way to use thirty thousand substitutions. It is picked up from
+Press `m`, or the **PII-mappings** button, for the run's substitution table:
+every attribute type down the side with its real count, the exact rows in the
+middle, paged. Nothing is sampled away — every original the pipeline found,
+what it replaced it with, and the ones it found and left alone. Search spans
+every type, and you can leave a comment on any row. It is picked up from
 `_pii/pii_mappings.db` beside the output if the run shipped one, otherwise
 point at it — either on the command line or in the panel itself, which asks
 when the run shipped none:
