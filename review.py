@@ -1002,6 +1002,8 @@ h2 .keep{flex:0 0 auto;background:#fff8e6;border:1px solid #f0e2bd;color:#6b5a2a
 mark.pii{border-radius:3px;padding:0 1px;background:#ffe9b8;color:inherit;
   box-shadow:inset 0 -1px 0 #e0bd6a}
 mark.pii.right{background:#cdebd8;box-shadow:inset 0 -1px 0 #7fb894}
+/* Detected and NOT replaced -- still in the deliverable. */
+mark.pii.leak{background:#fbd5d0;box-shadow:inset 0 -1px 0 #d99086}
 .empty{flex:1;display:grid;place-items:center;color:var(--mut);font-size:13px;text-align:center;padding:26px}
 /* Loading state. Without it the PREVIOUS document stays on screen while the
    next one is fetched, so pressing Enter looks like nothing happened -- the
@@ -1554,7 +1556,7 @@ function prefetch(){
    nothing on screen says which cell that was. So the originals are marked in
    the source pane and the replacements in the output pane, and the two tints
    line up cell for cell. */
-let PIIRX={orig:null,repl:null}, HILITE=true;
+let PIIRX={orig:null,repl:null,leak:null}, HILITE=true;
 function rxOf(list){
   if(!list||!list.length) return null;
   const esc=t=>t.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
@@ -1568,12 +1570,19 @@ function rxOf(list){
 async function loadPii(){
   try{
     const d=await (await fetch("/api/pii")).json();
-    PIIRX.orig=rxOf(d.orig); PIIRX.repl=rxOf(d.repl);
+    PIIRX.orig=rxOf(d.orig); PIIRX.repl=rxOf(d.repl); PIIRX.leak=rxOf(d.leak);
   }catch(e){}
 }
 function mark(root,side){
-  const rx = side==="left" ? PIIRX.orig : PIIRX.repl;
-  if(!root||!rx||!HILITE) return;
+  if(!root||!HILITE) return;
+  // Leaks are marked on BOTH panes: the value was detected and NOT replaced,
+  // so it is sitting in the output unchanged, and seeing it red on the right
+  // is the whole point.
+  paint(root, PIIRX.leak, "leak");
+  paint(root, side==="left" ? PIIRX.orig : PIIRX.repl, side);
+}
+function paint(root,rx,cls){
+  if(!root||!rx) return;
   const w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,{
     acceptNode:n=>(n.parentNode&&n.parentNode.nodeName==="MARK")
       ?NodeFilter.FILTER_REJECT
@@ -1605,7 +1614,7 @@ function mark(root,side){
       if(a<last) return;                        // overlapping longer match won
       if(a>last) frag.appendChild(document.createTextNode(v.slice(last,a)));
       const el2=document.createElement("mark");
-      el2.className="pii "+side; el2.textContent=v.slice(a,b);
+      el2.className="pii "+cls; el2.textContent=v.slice(a,b);
       frag.appendChild(el2); last=b;
     });
     if(last<v.length) frag.appendChild(document.createTextNode(v.slice(last)));
@@ -2493,20 +2502,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                     S.get("map_store"), S.get("map_inner"))
             except Exception as exc:  # noqa: BLE001
                 return self._json({"orig": [], "repl": [], "error": str(exc)[:200]})
-            o, r = set(), set()
+            # Three lists, because a mapping row means one of two very
+            # different things. A row WITH a replacement was substituted: mark
+            # the original in the source and the replacement in the output. A
+            # row WITHOUT one was DETECTED AND LEFT ALONE -- the value is still
+            # in the deliverable verbatim. Marking those the same amber said
+            # "handled" about the exact rows that were not, which is the worst
+            # thing this panel could get wrong.
+            o, r, leak = set(), set(), set()
             for row in out["rows"]:
                 if row.get("deleted"):
                     continue
-                a, b = row.get("original") or "", row.get("replacement") or ""
-                # Two characters matches half the corpus; a value that is not
-                # in the output at all is nothing to point at.
-                if len(a) >= 3:
+                a = row.get("original") or ""
+                b = row.get("replacement") or ""
+                # Two characters matches half the corpus.
+                if len(a) < 3:
+                    continue
+                if b:
                     o.add(a)
-                if len(b) >= 3:
-                    r.add(b)
+                    if len(b) >= 3:
+                        r.add(b)
+                else:
+                    leak.add(a)
             cap = 6000
-            return self._json({"orig": sorted(o, key=len, reverse=True)[:cap],
-                               "repl": sorted(r, key=len, reverse=True)[:cap]})
+            k = lambda v: sorted(v, key=len, reverse=True)[:cap]
+            return self._json({"orig": k(o), "repl": k(r), "leak": k(leak)})
         if path == "/api/mappings":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             try:
