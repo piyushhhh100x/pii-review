@@ -1963,16 +1963,6 @@ el("mbody").addEventListener("click",async e=>{
     body:JSON.stringify({key,text})});
   loadMaps();
 });
-/* ---------- folder names ---------- */
-/* The other half of the deliverable. A document's contents get two panes and
-   a diff; the folder it sits in gets nothing, and an identity folder that
-   kept its name leaks a person in the object key however clean the panes
-   look. This is that half, audited in one table. */
-el("fbody").addEventListener("click",e=>{
-  const more=e.target.closest(".fmore"); if(!more)return;
-});
-let FQT=null;
-
 el("mq").addEventListener("input",()=>{clearTimeout(MAPQ);
   MOFF=0;   // a filtered list is a different list; carrying an offset over it
   MAPQ=setTimeout(loadMaps,180);});
