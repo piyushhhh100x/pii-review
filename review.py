@@ -804,7 +804,7 @@ header{border-bottom:1px solid var(--line);padding:7px 12px;display:flex;gap:10p
    Always present, dimmed when the run shipped no database -- hiding it left a
    reviewer with no button, no explanation and no way in, which is what the QA
    pass reported as "cannot open mappings". */
-#mapbtn,#foldbtn{font:600 11px/1 ui-sans-serif,-apple-system,sans-serif;
+#mapbtn{font:600 11px/1 ui-sans-serif,-apple-system,sans-serif;
   letter-spacing:.02em;text-transform:uppercase;padding:5px 9px}
 .icobtn{border:1px solid var(--line);background:#fff;border-radius:6px;cursor:pointer;padding:4px 7px;color:var(--mut);line-height:1;display:flex;align-items:center}
 .icobtn:hover{color:var(--fg);border-color:var(--mut)}
@@ -851,8 +851,8 @@ header{border-bottom:1px solid var(--line);padding:7px 12px;display:flex;gap:10p
 body.rz{cursor:col-resize;user-select:none}
 /* The mapping table, over the panes. A modal because verifying a substitution
    is a detour from reviewing documents, not a thing you do beside it. */
-#mveil,#fveil{position:fixed;inset:0;background:rgba(26,29,33,.34);display:none;z-index:70;padding:34px}
-#mveil.on,#fveil.on{display:grid;place-items:center}
+#mveil{position:fixed;inset:0;background:rgba(26,29,33,.34);display:none;z-index:70;padding:34px}
+#mveil.on{display:grid;place-items:center}
 #mbox,#fbox{background:#fff;border-radius:10px;width:min(980px,96vw);max-height:86vh;
   display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,.22)}
 .mhead{display:flex;gap:10px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line)}
@@ -937,6 +937,9 @@ body.rz{cursor:col-resize;user-select:none}
 #info .v.ad{border-color:#e8d5b8;color:var(--warn)}
 #info .warnrow{color:var(--warn)} #info .badrow{color:var(--bad)}
 #side{position:relative;border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0;background:#fcfcfd}
+.tw{flex:0 0 auto;display:inline-block;width:10px;color:var(--mut);
+  transition:transform .12s ease;font-size:9px;line-height:1}
+.fold.open .tw{transform:rotate(90deg)}
 .crumb{padding:7px 10px 6px;border-bottom:1px solid var(--line);font-size:11.5px;
   color:var(--mut);display:flex;flex-wrap:wrap;align-items:center;gap:3px;background:#fafbfc}
 .cseg{cursor:pointer;padding:1px 4px;border-radius:4px;max-width:100%;overflow:hidden;
@@ -996,6 +999,9 @@ h2 .keep{flex:0 0 auto;background:#fff8e6;border:1px solid #f0e2bd;color:#6b5a2a
 .pane iframe{flex:1;width:100%;border:0;min-height:0}
 .scroll{flex:1;overflow:auto;background:#eef0f2;padding:10px 0;min-height:0}
 .scroll img,.scroll .ph{display:block;margin:0 auto 10px;background:#fff;box-shadow:0 1px 5px rgba(0,0,0,.15)}
+mark.pii{border-radius:3px;padding:0 1px;background:#ffe9b8;color:inherit;
+  box-shadow:inset 0 -1px 0 #e0bd6a}
+mark.pii.right{background:#cdebd8;box-shadow:inset 0 -1px 0 #7fb894}
 .empty{flex:1;display:grid;place-items:center;color:var(--mut);font-size:13px;text-align:center;padding:26px}
 /* Loading state. Without it the PREVIOUS document stays on screen while the
    next one is fetched, so pressing Enter looks like nothing happened -- the
@@ -1065,7 +1071,6 @@ kbd{font:11px ui-monospace,Menlo,monospace;background:var(--soft);border:1px sol
   <button id="rev"><span id="revic"></span><span id="revtx">Review</span></button>
   <input id="cbox" placeholder="add a comment…" spellcheck="false">
   <span class="count" id="count"></span>
-  <button class="icobtn" id="foldbtn" title="what every folder name became  (n)">Folder-names</button>
   <button class="icobtn" id="mapbtn" title="the run&#39;s PII mapping table  (m)">PII-mappings</button>
   <button class="icobtn" id="infobtn" title="details  (i)">i</button>
   <span id="split" title="change what is compared"></span>
@@ -1088,12 +1093,6 @@ kbd{font:11px ui-monospace,Menlo,monospace;background:var(--soft);border:1px sol
   </main>
   <aside id="info"></aside>
 </div>
-<div id="fveil"><div id="fbox">
-  <div class="mhead"><b>Folder-names</b><span id="fcount" class="opt"></span>
-    <input id="fq" placeholder="search a folder name, source or output" spellcheck="false">
-    <span class="x" id="fx">&times;</span></div>
-  <div id="fbody"></div>
-</div></div>
 <div id="mveil"><div id="mbox">
   <div class="mhead"><b>PII-mappings</b><span id="mcount" class="opt"></span>
     <input id="mq" placeholder="search every mapping &#8212; original, replacement or type" spellcheck="false">
@@ -1105,9 +1104,9 @@ kbd{font:11px ui-monospace,Menlo,monospace;background:var(--soft);border:1px sol
   <span><kbd>enter</kbd> review + next · <kbd>r</kbd> review · <kbd>c</kbd> comment</span>
   <span><kbd>&uarr;</kbd><kbd>&darr;</kbd> file · <kbd>&larr;</kbd><kbd>&rarr;</kbd> folder · <kbd>[</kbd><kbd>]</kbd> page</span>
   <span><kbd>a</kbd> <span id="mode">unreviewed only</span></span>
-  <span id="foldfoot" class="clik"><kbd>n</kbd> Folder-names</span>
   <span id="mapfoot" class="clik"><kbd>m</kbd> PII-mappings</span>
-  <span><kbd>s</kbd> list · <kbd>i</kbd> details · <kbd>y</kbd> <span id="syn">sync on</span> · <kbd>?</kbd> keys</span>
+  <span><kbd>s</kbd> list · <kbd>i</kbd> details · <kbd>y</kbd> <span id="hil" title="highlight PII  (h)">pii on</span>
+  <span id="syn">sync on</span> · <kbd>?</kbd> keys</span>
   <input id="jump" placeholder="jump # or name">
 </footer>
 </div>
@@ -1131,8 +1130,11 @@ function fileIcon(n){const e=(n.split(".").pop()||"").toLowerCase();
 function esc(t){const d=document.createElement("div");d.textContent=t;return d.innerHTML;}
 
 let ALL=[],VIEW=[],i=0,marks={},onlyNew=true,SYNC=true,CAN=false;
-//: Where the list is pointed, as path segments. [] is the root.
-let CWD=[];
+//: Folder paths currently expanded. The list is a tree you open in place,
+//: not a location you navigate to -- collapsing the siblings out of view to
+//: see one folder's contents is the thing that made it feel like a different
+//: screen every click.
+let OPENP=new Set();
 let inspected=null,twoWay=false;
 
 /* ---------- record: viewed / reviewed / comments ---------- */
@@ -1238,7 +1240,7 @@ function start(r){
     el("btext").textContent=r.scope_note; el("bfix").style.display="none";
     el("banner").classList.add("on");}
   else el("banner").classList.remove("on");
-  CWD=[];i=0;
+  OPENP=new Set();i=0;
   build(); list();
   const w=parseInt(location.hash.slice(1),10);
   if(!isNaN(w)){const at=VIEW.findIndex(p=>p.id===w); if(at>=0) i=at;}
@@ -1259,35 +1261,39 @@ function pool(){return q()? ALL.concat(EXTRA) : ALL;}
 const entOf=p=>p.label.split("/")[0];
 function q(){return el("q").value.trim().toLowerCase();}
 function matches(p){const s=q(); return !s || p.label.toLowerCase().includes(s);}
-//: Everything at or below the current directory.
-function under(p,cwd){
-  if(!cwd.length) return true;
-  const pre=cwd.join("/");
-  return p.label===pre || p.label.startsWith(pre+"/");
-}
-/*: The current directory split into the folders and the files directly in it.
-    One level at a time, the way a file browser does it -- the old list jumped
-    straight from the run to every file with its whole relative path crammed
-    into the row. */
-function kids(cwd){
-  const dirs=new Map(), files=[];
-  pool().filter(matches).filter(p=>under(p,cwd)).forEach(p=>{
-    const rest = cwd.length ? p.label.slice(cwd.join("/").length+1) : p.label;
-    const ix = rest.indexOf("/");
-    if(ix<0){ files.push(p); return; }
-    const d = rest.slice(0,ix);
-    if(!dirs.has(d)) dirs.set(d,[]);
-    dirs.get(d).push(p);
-  });
-  return {dirs,files};
+//: The visible tree, flattened to rows: a folder, then its contents if it is
+//: open, then the next folder. Depth drives the indent.
+function treeRows(){
+  const items=pool().filter(matches);
+  const rows=[];
+  const walk=(prefix,depth)=>{
+    const dirs=new Map(), files=[];
+    const cut=prefix.length+1;
+    items.forEach(p=>{
+      if(prefix && !(p.label===prefix || p.label.startsWith(prefix+"/"))) return;
+      const rest = prefix ? p.label.slice(cut) : p.label;
+      const ix=rest.indexOf("/");
+      if(ix<0){files.push(p);return;}
+      const d=rest.slice(0,ix);
+      if(!dirs.has(d)) dirs.set(d,[]);
+      dirs.get(d).push(p);
+    });
+    [...dirs.keys()].sort().forEach(name=>{
+      const path=prefix?prefix+"/"+name:name;
+      const open=OPENP.has(path);
+      rows.push({dir:true,path,name,depth,arr:dirs.get(name),open});
+      if(open) walk(path,depth+1);
+    });
+    files.sort((a,b)=>a.label<b.label?-1:1)
+         .forEach(p=>rows.push({dir:false,p,depth}));
+  };
+  walk("",0);
+  return rows;
 }
 function build(){
-  // j/k walk the whole subtree you are standing in, not just the files
-  // directly in it -- otherwise Enter stops dead at every folder boundary.
-  // A SEARCH is run-wide though: scoping hits to the current folder meant
-  // typing a name that lives elsewhere returned nothing at all.
+  // j/k walk every file in the run, in the order the tree shows them, so
+  // Enter never stops dead at a folder boundary.
   let v = pool().filter(matches);
-  if(!q()) v = v.filter(p=>under(p,CWD));
   VIEW = onlyNew ? v.filter(p=>!rec(p).reviewed) : v;
   if(i>=VIEW.length) i=Math.max(0,VIEW.length-1);
 }
@@ -1334,7 +1340,8 @@ function folderRow(name,arr,go){
   if(note) bits.push(`${note} comment${note===1?"":"s"}`);
   if(miss) bits.push(`<span class="w">${miss} missing</span>`);
   const d=document.createElement("div"); d.className="fold";
-  d.innerHTML=`<span class="ic">${done>=arr.length&&arr.length?ICON.done:ICON.folder}</span>
+  d.innerHTML=`<span class="tw">&#9656;</span>
+    <span class="ic">${done>=arr.length&&arr.length?ICON.done:ICON.folder}</span>
     <span class="tx"><div class="n">${esc(name.split("/").pop())}</div>
     <div class="m">${bits.join(" · ")}</div></span>`;
   d.onclick=go;
@@ -1342,87 +1349,39 @@ function folderRow(name,arr,go){
 }
 function list(){
   const box=el("list"); box.innerHTML="";
-
-  // Searching is a different question from browsing: show the matches from
-  // anywhere in the run, but GROUPED under the folder holding them, with the
-  // path inside that folder on each row. A flat list of full paths truncates
-  // to the same prefix over and over and tells you nothing.
+  // A search opens every folder on the way to a hit, so matches are visible
+  // in place instead of behind a click.
   if(q()){
-    const hits=pool().filter(matches);
-    const groups=new Map();
-    hits.forEach(p=>{const e=entOf(p); if(!groups.has(e))groups.set(e,[]); groups.get(e).push(p);});
-    [...groups.keys()].sort().forEach(name=>{
-      const arr=groups.get(name);
-      box.appendChild(folderRow(name,arr,()=>{CWD=[name];el("q").value="";
-        i=0;build();list();render();}));
-      arr.forEach(p=>box.appendChild(
-        fileRow(p, p.label.length>name.length ? p.label.slice(name.length+1) : p.label)));
+    pool().filter(matches).forEach(p=>{
+      const seg=p.label.split("/");
+      for(let n=1;n<seg.length;n++) OPENP.add(seg.slice(0,n).join("/"));
     });
-    if(!hits.length){
-      const e=document.createElement("div"); e.className="none";
-      e.textContent="nothing matches that search"; box.appendChild(e);
+  }
+  const rows=treeRows();
+  const pad=d=>`padding-left:${8+d*15}px`;
+
+  rows.forEach(r=>{
+    if(r.dir){
+      const d=folderRow(r.path,r.arr,()=>{
+        OPENP.has(r.path)?OPENP.delete(r.path):OPENP.add(r.path);
+        list();
+      });
+      d.classList.toggle("open",r.open);
+      d.style.cssText=pad(r.depth);
+      box.appendChild(d);
+    }else{
+      const f=fileRow(r.p,r.p.label.split("/").pop());
+      f.style.cssText=pad(r.depth+1);
+      box.appendChild(f);
     }
-    return;
-  }
-
-  const {dirs,files}=kids(CWD);
-  const stat=arr=>{let done=0,miss=0,note=0,bytes=0;
-    arr.forEach(p=>{const x=rec(p); if(x.reviewed)done++; note+=x.comments.length;
-      bytes+=p.lb||0; if(p.how==="missing")miss++;});
-    return {done,miss,note,bytes,n:arr.length};};
-
-  // Breadcrumb. Every level is clickable, so getting back out is one click
-  // rather than a folder-by-folder climb.
-  const bc=document.createElement("div"); bc.className="crumb";
-  const seg=(txt,to)=>{const a=document.createElement("span");
-    a.className="cseg"; a.textContent=txt;
-    a.onclick=()=>{CWD=to; i=0; build(); list(); render();};
-    return a;};
-  bc.appendChild(seg("Everything",[]));
-  CWD.forEach((name,n)=>{
-    const sp=document.createElement("span"); sp.className="csep"; sp.textContent="/";
-    bc.appendChild(sp);
-    bc.appendChild(seg(name, CWD.slice(0,n+1)));
-  });
-  box.appendChild(bc);
-
-  // Up one level.
-  if(CWD.length){
-    const up=document.createElement("div"); up.className="fold up";
-    up.innerHTML='<span class="ic">&#8598;</span><span class="tx"><div class="n">..</div>'+
-                 '<div class="m">back to '+esc(CWD.length>1?CWD[CWD.length-2]:"Everything")+'</div></span>';
-    up.onclick=()=>{CWD=CWD.slice(0,-1); i=0; build(); list(); render();};
-    box.appendChild(up);
-  }
-
-  // No run-summary row. The header already carries "N viewed · N reviewed ·
-  // N files", so repeating it here was noise on top of the one thing the list
-  // is for: the folders.
-  // Folders first, then the files sitting directly here.
-  [...dirs.keys()].sort().forEach(name=>{
-    box.appendChild(folderRow(CWD.concat(name).join("/"), dirs.get(name),
-      ()=>{CWD=CWD.concat(name); i=0; build(); list(); render();}));
   });
 
-  files.forEach(p=>box.appendChild(fileRow(p,p.label.split("/").pop())));
-
-  if(!dirs.size && !files.length){
+  if(!rows.length){
     const e=document.createElement("div"); e.className="none";
-    e.textContent = q() ? "nothing here matches that search" : "this folder is empty";
+    e.textContent = q()?"nothing matches that search":"nothing here";
     box.appendChild(e);
   }
 }
-function snote(r){
-  const box=el("snote");
-  if(!q()||!r){box.classList.remove("on");box.textContent="";return;}
-  const bits=[`${num(r.matched)} of ${num(r.total)} files match`];
-  if(EXTRA.length) bits.push(`${num(EXTRA.length)} outside your sample`);
-  if(SMORE) bits.push(`showing the first ${num(r.rows.length)}`);
-  box.textContent=bits.join(" · ");
-  box.classList.add("on");
-}
-
-function folders(){return [...new Set(pool().filter(matches).map(entOf))].sort();}
 el("q").addEventListener("input",()=>{
   i=0;build();list();render();
   clearTimeout(SQ); SQ=setTimeout(search,200);
@@ -1444,17 +1403,20 @@ async function search(){
 }
 
 function stepFolder(d){
-  // Siblings at the depth you are standing at. Stepping to a TOP-level folder
-  // from three levels down, which is what the old entOf-based version did once
-  // navigation gained depth, is not "next folder".
-  const up=CWD.slice(0,-1);
-  const ns=[...kids(up).dirs.keys()].sort();
-  if(!ns.length)return;
-  const at=ns.indexOf(CWD[CWD.length-1]);
-  const n = at<0 ? (d>0?0:ns.length-1) : Math.min(ns.length-1,Math.max(0,at+d));
-  CWD=up.concat(ns[n]); i=0; build(); list(); render();
-  const cur=el("list").querySelector('.fold[aria-current=true]');
-  if(cur) cur.scrollIntoView({block:"nearest"});
+  // Top-level folder to top-level folder, opening the one it lands on and
+  // parking the cursor on its first file. The tree is expanded in place, so
+  // "next folder" is a jump within one list rather than a change of screen.
+  const tops=[...new Set(pool().filter(matches).map(entOf))].sort();
+  if(!tops.length)return;
+  const cur=VIEW[i]?entOf(VIEW[i]):tops[0];
+  const at=tops.indexOf(cur);
+  const n=at<0?(d>0?0:tops.length-1):Math.min(tops.length-1,Math.max(0,at+d));
+  OPENP.add(tops[n]);
+  const first=VIEW.findIndex(p=>entOf(p)===tops[n]);
+  if(first>=0) i=first;
+  list(); render();
+  const row=el("list").querySelector('.file[aria-current=true]');
+  if(row) row.scrollIntoView({block:"nearest"});
 }
 function toggleSide(force){
   const on = force===undefined ? !el("body").classList.contains("narrow") : !force;
@@ -1528,6 +1490,11 @@ function linkScroll(a,b){
     if(!SYNC||BUSY)return; BUSY=true;
     const r=Math.max(1,from.scrollHeight-from.clientHeight);
     to.scrollTop=(from.scrollTop/r)*Math.max(1,to.scrollHeight-to.clientHeight);
+    // Sideways too. A wide table is the case where the panes are hardest to
+    // compare -- scrolling one to column 20 and leaving the other at column 1
+    // is exactly when you need them level.
+    const rx=Math.max(1,from.scrollWidth-from.clientWidth);
+    to.scrollLeft=(from.scrollLeft/rx)*Math.max(1,to.scrollWidth-to.clientWidth);
     requestAnimationFrame(()=>{BUSY=false;});
   };
   a.addEventListener("scroll",mirror(a,b),{passive:true});
@@ -1582,6 +1549,69 @@ function prefetch(){
     if(p.right&&!SOLO) docFetch("right",p.id).catch(()=>{});};
   (window.requestIdleCallback||(f=>setTimeout(f,120)))(run);
 }
+/* Highlighting. A redaction is obvious -- the value is gone. A REPLACEMENT is
+   not: "makhubocalvin@gmail.com" became "zoravinadorncombe@gmail.com" and
+   nothing on screen says which cell that was. So the originals are marked in
+   the source pane and the replacements in the output pane, and the two tints
+   line up cell for cell. */
+let PIIRX={orig:null,repl:null}, HILITE=true;
+function rxOf(list){
+  if(!list||!list.length) return null;
+  const esc=t=>t.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+  // Longest first so a name is not eaten by its own surname.
+  const body=list.map(esc).join("|");
+  // Case-insensitive: the rewriter preserves the SOURCE cell's casing, so a
+  // mapping stored as "Optory Labs" is written into the output as
+  // "OPTORY LABS" and an exact match silently never fires.
+  try{ return new RegExp("("+body+")","gi"); }catch(e){ return null; }
+}
+async function loadPii(){
+  try{
+    const d=await (await fetch("/api/pii")).json();
+    PIIRX.orig=rxOf(d.orig); PIIRX.repl=rxOf(d.repl);
+  }catch(e){}
+}
+function mark(root,side){
+  const rx = side==="left" ? PIIRX.orig : PIIRX.repl;
+  if(!root||!rx||!HILITE) return;
+  const w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,{
+    acceptNode:n=>(n.parentNode&&n.parentNode.nodeName==="MARK")
+      ?NodeFilter.FILTER_REJECT
+      :(n.nodeValue&&n.nodeValue.length>2?NodeFilter.FILTER_ACCEPT:NodeFilter.FILTER_REJECT)});
+  const todo=[]; let n;
+  while((n=w.nextNode())) todo.push(n);
+  todo.forEach(t=>{
+    const v=t.nodeValue;
+    // Whole values only. A mapping for "auto" was lighting up "automatically",
+    // "fica" lit "identification" and "084" lit the tail of an id -- the marks
+    // said PII where there was none, which is worse than saying nothing.
+    // Checked either side of the match rather than with \\b in the pattern,
+    // because a value can start or end with punctuation (an email, "& Retail")
+    // and \\b would then refuse the match outright.
+    const W=/[A-Za-z0-9_]/;
+    const hits=[]; let m;
+    rx.lastIndex=0;
+    while((m=rx.exec(v))){
+      if(!m[0].length){rx.lastIndex++;continue;}
+      const a=m.index, b=a+m[0].length;
+      const lOK = !W.test(m[0][0])            || a===0        || !W.test(v[a-1]);
+      const rOK = !W.test(m[0][m[0].length-1]) || b>=v.length || !W.test(v[b]);
+      if(lOK&&rOK) hits.push([a,b]);
+    }
+    if(!hits.length) return;
+    const frag=document.createDocumentFragment();
+    let last=0;
+    hits.forEach(([a,b])=>{
+      if(a<last) return;                        // overlapping longer match won
+      if(a>last) frag.appendChild(document.createTextNode(v.slice(last,a)));
+      const el2=document.createElement("mark");
+      el2.className="pii "+side; el2.textContent=v.slice(a,b);
+      frag.appendChild(el2); last=b;
+    });
+    if(last<v.length) frag.appendChild(document.createTextNode(v.slice(last)));
+    t.parentNode.replaceChild(frag,t);
+  });
+}
 function shimmer(box){
   box.innerHTML="<div class='shim'><b></b>"+"<i></i>".repeat(14)+"</div>";
 }
@@ -1618,6 +1648,7 @@ async function panes(p){
   if(wantRight) RS=build_pane(el("rp"),"right",p.id,rm);
   else if(!SOLO) el("rp").innerHTML="<div class='empty'><b>Nothing in the output for this document.</b><br>"+
         "Either the run withheld it, or it was never processed.</div>";
+  mark(LS,"left"); if(RS) mark(RS,"right");
   if(lm.kind==="records"&&rm.kind==="records") alignRecords(LS,RS);
   linkScroll(LS,RS);
   prefetch();
@@ -1937,56 +1968,10 @@ el("mbody").addEventListener("click",async e=>{
    a diff; the folder it sits in gets nothing, and an identity folder that
    kept its name leaks a person in the object key however clean the panes
    look. This is that half, audited in one table. */
-let FALL=null, FOPEN={}, FSEQ=0;
-async function folds(){
-  el("fveil").classList.add("on"); el("fq").focus();
-  if(FALL===null){
-    el("fbody").innerHTML=`<p class="more">reading the tree\u2026</p>`;
-    const seq=++FSEQ;
-    let r; try{ r=await(await fetch("/api/folders")).json(); }
-    catch(e){ el("fbody").innerHTML=`<p class="more">${esc(String(e))}</p>`; return; }
-    if(seq!==FSEQ)return;
-    FALL=r.rows||[];
-  }
-  drawFolds();
-}
-function drawFolds(){
-  const q=el("fq").value.trim().toLowerCase();
-  const hit=FALL.filter(f=>!q||f.path.toLowerCase().includes(q)||
-                            (f.out||"").toLowerCase().includes(q));
-  el("fcount").textContent=`${num(hit.length)} folders`;
-  const n=FOPEN.n||300, show=hit.slice(0,n), left=hit.length-show.length;
-  if(!hit.length){el("fbody").innerHTML=`<p class="more">Nothing matches.</p>`;return;}
-  el("fbody").innerHTML=
-    `<table><thead><tr><th>folder</th><th>in the source</th>`+
-    `<th>in the output</th><th>files</th></tr></thead><tbody>`+
-    show.map(f=>{
-      const same = f.out===f.name;
-      return `<tr class="${f.risk?"risk":""}">`+
-        `<td class=fp>${esc(f.parent||"/")}</td>`+
-        `<td class=fn>${esc(f.name)}</td>`+
-        `<td class="${same?"fk":"fo"}">${f.out==null?"<i>nothing paired</i>":esc(f.out)}`+
-          (f.risk?`<span class=why>${esc(f.risk)}</span>`:"")+
-          (f.shared&&f.shared.length?`<span class=why>also what `+
-            `${esc(f.shared.map(x=>x.split("/").pop()).join(", "))} became</span>`:"")+
-        `</td>`+
-        `<td class=fp style="text-align:right">${f.files?num(f.files):""}</td></tr>`;
-    }).join("")+`</tbody></table>`+
-    (left>0?`<button class="lnk fmore" data-n="${n}">show ${num(Math.min(left,500))}`+
-            ` more of ${num(left)}</button>`:"");
-}
 el("fbody").addEventListener("click",e=>{
   const more=e.target.closest(".fmore"); if(!more)return;
-  FOPEN.n=parseInt(more.dataset.n,10)+500; drawFolds();
 });
 let FQT=null;
-el("fq").addEventListener("input",()=>{clearTimeout(FQT);
-  FOPEN={};   // a filtered list is a different list; carrying offsets over it
-  FQT=setTimeout(drawFolds,120);});
-el("fx").onclick=()=>el("fveil").classList.remove("on");
-el("fveil").onclick=e=>{if(e.target.id==="fveil")el("fveil").classList.remove("on");};
-el("foldbtn").onclick=()=>folds();
-el("foldfoot").onclick=()=>folds();
 
 el("mq").addEventListener("input",()=>{clearTimeout(MAPQ);
   MOFF=0;   // a filtered list is a different list; carrying an offset over it
@@ -1995,9 +1980,8 @@ el("mx").onclick=()=>el("mveil").classList.remove("on");
 el("mveil").onclick=e=>{if(e.target.id==="mveil")el("mveil").classList.remove("on");};
 
 addEventListener("keydown",e=>{
-  if(el("mveil").classList.contains("on")||el("fveil").classList.contains("on")){
-    if(e.key==="Escape"){el("mveil").classList.remove("on");
-                         el("fveil").classList.remove("on");}
+  if(el("mveil").classList.contains("on")){
+    if(e.key==="Escape") el("mveil").classList.remove("on");
     return;
   }
   if(el("app").style.display==="none")return;
@@ -2029,7 +2013,8 @@ addEventListener("keydown",e=>{
   else if(kl==="s"){e.preventDefault();toggleSide();}
   else if(kl==="i"){e.preventDefault();toggleInfo();}
   else if(kl==="m"){e.preventDefault();maps();}
-  else if(kl==="n"){e.preventDefault();folds();}
+  else if(kl==="h"){e.preventDefault();HILITE=!HILITE;
+    el("hil").textContent=HILITE?"pii on":"pii off"; render();}
   else if(kl==="y"){e.preventDefault();SYNC=!SYNC;el("syn").textContent=SYNC?"sync on":"sync off";}
   else if(kl==="a"){e.preventDefault();onlyNew=!onlyNew;
     el("mode").textContent=onlyNew?"unreviewed only":"all files";build();list();render();}
@@ -2076,7 +2061,7 @@ fetch("/api/boot").then(r=>r.json()).then(b=>{
   (b.recent||[]).slice(0,3).forEach(v=>{const d=document.createElement("div");
     d.className="recent";d.textContent="↩ "+v;
     d.onclick=()=>{el("root").value=v;syncProf();inspect();};box.appendChild(d);});
-  if(b.ready) start(b); else el("root").focus();
+  if(b.ready){ loadPii().then(()=>{start(b);}); } else el("root").focus();
 });
 </script></body></html>"""
 
@@ -2293,11 +2278,6 @@ def open_review(root=None, left=None, right=None, profile=None,
     # person and their employer in the object key, whatever the documents
     # under it look like, so the source-to-output correspondence is worked out
     # once here and audited in its own panel.
-    left_dirs = {pairing.normalise(p, ign)[:-1]
-                 for p in idx["unmatched_left"] + idx["out_of_scope"]}
-    # Same reason: the folder-name audit is a before/after, and single mode has
-    # no before.
-    folders = [] if solo else pairing.folder_map(idx["pairs"], ign, left_dirs, partial)
     for r in rows:
         # In single mode left IS right, so every personal-looking segment reads
         # as "unchanged in the output" and the tool's own leak hint fires on
@@ -2334,7 +2314,7 @@ def open_review(root=None, left=None, right=None, profile=None,
             map_spec, map_store, map_inner = f"{rs}/{inner}", rs, inner
 
     with _LOCK:
-        S.update(ready=True, rows=every, sample=rows, folders=folders,
+        S.update(ready=True, rows=every, sample=rows,
                  left_store=ls, right_store=rs,
                  profile=profile, sample_salt=salt,
                  map_spec=map_spec, map_store=map_store,
@@ -2426,8 +2406,6 @@ def open_review(root=None, left=None, right=None, profile=None,
                "has_map": bool(map_spec),
                # Enough for the header to say whether the panel is worth
                # opening. The rows themselves come on demand.
-               "folder_risk": sum(1 for f in folders if f["risk"]),
-               "folder_count": len(folders),
                "left_short": short(ls, source), "right_short": short(rs, output),
                "source": source, "output": output, "root": root,
                # What the browser tab is named. Two tabs on two batches are
@@ -2513,13 +2491,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
                    or look in r["left"].lower()]
             return self._json({"rows": hit[:SEARCH_MAX], "matched": len(hit),
                                "total": len(rows), "cap": SEARCH_MAX})
-        if path == "/api/folders":
-            # The whole audit in one response. There are three orders of
-            # magnitude fewer folders than mappings, so paging and searching
-            # them server-side would buy a round trip per keystroke and
-            # nothing else.
-            return self._json({"rows": S.get("folders", []),
-                               "partial": bool((S.get("session") or {}).get("partial"))})
+        if path == "/api/pii":
+            # Just the strings, for highlighting the panes. The mappings panel
+            # wants rows, types and paging; this wants two flat lists and
+            # wants them small, because the client compiles them into a regex.
+            src = S.get("map_spec")
+            if not src:
+                return self._json({"orig": [], "repl": []})
+            try:
+                out = read_mappings(src, S.get("profile"),
+                                    S.get("map_store"), S.get("map_inner"))
+            except Exception as exc:  # noqa: BLE001
+                return self._json({"orig": [], "repl": [], "error": str(exc)[:200]})
+            o, r = set(), set()
+            for row in out["rows"]:
+                if row.get("deleted"):
+                    continue
+                a, b = row.get("original") or "", row.get("replacement") or ""
+                # Two characters matches half the corpus; a value that is not
+                # in the output at all is nothing to point at.
+                if len(a) >= 3:
+                    o.add(a)
+                if len(b) >= 3:
+                    r.add(b)
+            cap = 6000
+            return self._json({"orig": sorted(o, key=len, reverse=True)[:cap],
+                               "repl": sorted(r, key=len, reverse=True)[:cap]})
         if path == "/api/mappings":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             try:
