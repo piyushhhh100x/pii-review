@@ -809,6 +809,7 @@ header{border-bottom:1px solid var(--line);padding:7px 12px;display:flex;gap:10p
 .icobtn{border:1px solid var(--line);background:#fff;border-radius:6px;cursor:pointer;padding:4px 7px;color:var(--mut);line-height:1;display:flex;align-items:center}
 .icobtn:hover{color:var(--fg);border-color:var(--mut)}
 .pos{font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap;font-size:13px}
+.name.peek{color:var(--ok,#2f855a)}
 .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:12.5px ui-monospace,Menlo,monospace}
 .tag{font-size:10px;text-transform:uppercase;letter-spacing:.05em;padding:2px 6px;border-radius:4px;
  background:var(--soft);border:1px solid var(--line);color:var(--mut);white-space:nowrap}
@@ -833,11 +834,21 @@ header{border-bottom:1px solid var(--line);padding:7px 12px;display:flex;gap:10p
 .chip b{cursor:pointer;color:var(--mut);font-weight:400;padding:0 4px;border-radius:50%}
 .chip b:hover{color:var(--bad);background:#fdecea}
 
-#body{flex:1;display:grid;grid-template-columns:250px 1fr;min-height:0}
+/* The list width is a variable so it can be dragged: file names here are full
+   relative paths and 250px truncated almost all of them. Persisted, because
+   re-dragging it on every run is the kind of small tax nobody reports. */
+#body{flex:1;display:grid;grid-template-columns:var(--sw,250px) 1fr;min-height:0}
 #body.narrow{grid-template-columns:1fr}
 #body.narrow #side{display:none}
-#body.info{grid-template-columns:250px 1fr 268px}
+#body.info{grid-template-columns:var(--sw,250px) 1fr 268px}
 #body.narrow.info{grid-template-columns:1fr 268px}
+/* right:0 matters. With neither left nor right the box falls back to its
+   STATIC position -- the top-left of the sidebar -- so the handle was
+   invisible and unreachable at the wrong edge. */
+#grip{position:absolute;top:0;bottom:0;right:-4px;width:9px;cursor:col-resize;z-index:6}
+#grip:hover::after,#grip.on::after{content:"";position:absolute;left:3px;top:0;bottom:0;
+  width:2px;background:var(--ok,#2f855a);opacity:.55}
+body.rz{cursor:col-resize;user-select:none}
 /* The mapping table, over the panes. A modal because verifying a substitution
    is a detour from reviewing documents, not a thing you do beside it. */
 #mveil,#fveil{position:fixed;inset:0;background:rgba(26,29,33,.34);display:none;z-index:70;padding:34px}
@@ -925,7 +936,15 @@ header{border-bottom:1px solid var(--line);padding:7px 12px;display:flex;gap:10p
 #info .v.rm{border-color:#cfe0dc;color:var(--ok)}
 #info .v.ad{border-color:#e8d5b8;color:var(--warn)}
 #info .warnrow{color:var(--warn)} #info .badrow{color:var(--bad)}
-#side{border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0;background:#fcfcfd}
+#side{position:relative;border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0;background:#fcfcfd}
+.crumb{padding:7px 10px 6px;border-bottom:1px solid var(--line);font-size:11.5px;
+  color:var(--mut);display:flex;flex-wrap:wrap;align-items:center;gap:3px;background:#fafbfc}
+.cseg{cursor:pointer;padding:1px 4px;border-radius:4px;max-width:100%;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.cseg:hover{background:#eceff2;color:var(--fg)}
+.csep{opacity:.45}
+.fold.up .n{font:12.5px ui-monospace,Menlo,monospace}
+.none{padding:16px 12px;font-size:12px;color:var(--mut)}
 #side .top{padding:8px 9px;border-bottom:1px solid var(--line);display:flex;gap:6px;align-items:center}
 #side input{flex:1;min-width:0;font-size:12.5px;padding:5px 9px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--fg)}
 #list{flex:1;overflow:auto;padding:3px 0 24px}
@@ -953,6 +972,11 @@ header{border-bottom:1px solid var(--line);padding:7px 12px;display:flex;gap:10p
 #snote.on{display:block}
 
 main{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);min-height:0}
+/* One-pane mode: reviewing a TRANSFORMED tree on its own, where there is no
+   source half to compare against. The right section leaves the grid entirely
+   rather than collapsing, so the left pane gets the full width. */
+main.solo{grid-template-columns:1fr}
+main.solo>section:nth-child(2){display:none}
 section{background:#fff;display:flex;flex-direction:column;min-width:0;min-height:0}
 h2{margin:0;padding:5px 12px;font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--mut);
  background:var(--soft);border-bottom:1px solid var(--line);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -973,6 +997,25 @@ h2 .keep{flex:0 0 auto;background:#fff8e6;border:1px solid #f0e2bd;color:#6b5a2a
 .scroll{flex:1;overflow:auto;background:#eef0f2;padding:10px 0;min-height:0}
 .scroll img,.scroll .ph{display:block;margin:0 auto 10px;background:#fff;box-shadow:0 1px 5px rgba(0,0,0,.15)}
 .empty{flex:1;display:grid;place-items:center;color:var(--mut);font-size:13px;text-align:center;padding:26px}
+/* Loading state. Without it the PREVIOUS document stays on screen while the
+   next one is fetched, so pressing Enter looks like nothing happened -- the
+   reviewer cannot tell a slow load from a repeated file. */
+.shim{flex:1;overflow:hidden;background:#eef0f2;padding:14px 16px}
+.shim i{display:block;height:11px;border-radius:5px;margin:0 0 9px;
+  background:linear-gradient(90deg,#e3e6ea 25%,#f2f4f6 37%,#e3e6ea 63%);
+  background-size:400% 100%;animation:sh 1.1s ease-in-out infinite}
+.shim i:nth-child(3n){width:72%}.shim i:nth-child(3n+1){width:93%}
+.shim i:nth-child(4n){width:58%}
+.shim b{display:block;height:15px;width:38%;border-radius:5px;margin:0 0 14px;
+  background:linear-gradient(90deg,#dde1e6 25%,#eef0f3 37%,#dde1e6 63%);
+  background-size:400% 100%;animation:sh 1.1s ease-in-out infinite}
+@keyframes sh{0%{background-position:100% 50%}100%{background-position:0 50%}}
+@media (prefers-reduced-motion:reduce){.shim i,.shim b{animation:none}}
+/* A long export is thousands of rows and the whole document is one innerHTML.
+   content-visibility lets the browser skip layout and paint for the parts that
+   are off screen, so the first screenful appears without waiting for the rest.
+   The intrinsic size keeps the scrollbar honest while they are skipped. */
+.scroll.doc .rec{content-visibility:auto;contain-intrinsic-size:auto 42px}
 .empty .why{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;opacity:.8}
 .empty .raw{display:inline-block;margin-top:10px;color:var(--fg);text-decoration:underline}
 
@@ -1030,6 +1073,7 @@ kbd{font:11px ui-monospace,Menlo,monospace;background:var(--soft);border:1px sol
 <div id="cbar"></div>
 <div id="body">
   <aside id="side">
+    <div id="grip" title="drag to resize the list"></div>
     <div class="top"><input id="q" placeholder="search every file in the run" spellcheck="false">
       <button class="icobtn" id="hideside" title="hide the list  (s)">&#171;</button></div>
     <div id="snote"></div>
@@ -1086,7 +1130,9 @@ function fileIcon(n){const e=(n.split(".").pop()||"").toLowerCase();
  return ICON.doc;}
 function esc(t){const d=document.createElement("div");d.textContent=t;return d.innerHTML;}
 
-let ALL=[],VIEW=[],i=0,marks={},onlyNew=true,ENT=null,OPEN=null,SYNC=true,CAN=false;
+let ALL=[],VIEW=[],i=0,marks={},onlyNew=true,SYNC=true,CAN=false;
+//: Where the list is pointed, as path segments. [] is the root.
+let CWD=[];
 let inspected=null,twoWay=false;
 
 /* ---------- record: viewed / reviewed / comments ---------- */
@@ -1158,10 +1204,15 @@ async function open_(){
 }
 el("go").onclick=()=>{ if(!twoWay&&!inspected) inspect(); else open_(); };
 
+let SOLO=false, HOVER=null;
 function start(r){
+  DOCC.clear();
   ALL=r.pairs; marks=r.marks||{};
   el("veil").classList.remove("on"); el("app").style.display="flex";
-  el("lh").textContent="Source · "+(r.left_short||"source"); el("lh").title=r.left||"";
+  SOLO=!!r.solo;
+  document.querySelector("main").classList.toggle("solo",SOLO);
+  el("lh").textContent=(SOLO?(r.solo_label||"Transformed")+" · ":"Source · ")+(r.left_short||"source");
+  el("lh").title=r.left||"";
   el("rh").textContent="Output · "+(r.right_short||"output"); el("rh").title=r.right||"";
   el("split").textContent=(r.source||"everything else")+" → "+(r.output||"?");
   // Two tabs on two batches look identical without this.
@@ -1187,7 +1238,7 @@ function start(r){
     el("btext").textContent=r.scope_note; el("bfix").style.display="none";
     el("banner").classList.add("on");}
   else el("banner").classList.remove("on");
-  ENT=null;OPEN=null;i=0;
+  CWD=[];i=0;
   build(); list();
   const w=parseInt(location.hash.slice(1),10);
   if(!isNaN(w)){const at=VIEW.findIndex(p=>p.id===w); if(at>=0) i=at;}
@@ -1206,79 +1257,172 @@ let EXTRA=[], SMORE=0, SSEQ=0, SQ=null, TOTAL=0;
    hundred rows per app would miss it almost every time. */
 function pool(){return q()? ALL.concat(EXTRA) : ALL;}
 const entOf=p=>p.label.split("/")[0];
-const restOf=p=>p.label.split("/").slice(1).join("/");
 function q(){return el("q").value.trim().toLowerCase();}
 function matches(p){const s=q(); return !s || p.label.toLowerCase().includes(s);}
+//: Everything at or below the current directory.
+function under(p,cwd){
+  if(!cwd.length) return true;
+  const pre=cwd.join("/");
+  return p.label===pre || p.label.startsWith(pre+"/");
+}
+/*: The current directory split into the folders and the files directly in it.
+    One level at a time, the way a file browser does it -- the old list jumped
+    straight from the run to every file with its whole relative path crammed
+    into the row. */
+function kids(cwd){
+  const dirs=new Map(), files=[];
+  pool().filter(matches).filter(p=>under(p,cwd)).forEach(p=>{
+    const rest = cwd.length ? p.label.slice(cwd.join("/").length+1) : p.label;
+    const ix = rest.indexOf("/");
+    if(ix<0){ files.push(p); return; }
+    const d = rest.slice(0,ix);
+    if(!dirs.has(d)) dirs.set(d,[]);
+    dirs.get(d).push(p);
+  });
+  return {dirs,files};
+}
 function build(){
+  // j/k walk the whole subtree you are standing in, not just the files
+  // directly in it -- otherwise Enter stops dead at every folder boundary.
+  // A SEARCH is run-wide though: scoping hits to the current folder meant
+  // typing a name that lives elsewhere returned nothing at all.
   let v = pool().filter(matches);
-  if(ENT) v = v.filter(p=>entOf(p)===ENT);
+  if(!q()) v = v.filter(p=>under(p,CWD));
   VIEW = onlyNew ? v.filter(p=>!rec(p).reviewed) : v;
   if(i>=VIEW.length) i=Math.max(0,VIEW.length-1);
 }
+//: One file row. Shared by the folder view and the search results, which
+//: differ only in how much of the path the row shows.
+function fileRow(p,text){
+  const r=rec(p);
+  const cls=r.reviewed?"reviewed":(p.how==="missing"?"missing":(r.viewed?"viewed":""));
+  const f=document.createElement("div");
+  f.className="file"+(p.sampled===false?" extra":"");
+  f.setAttribute("aria-current", !!(VIEW[i]&&VIEW[i].id===p.id));
+  f.innerHTML=`<span class="dot ${cls}"></span><span class="ic">${fileIcon(text)}</span>`+
+              `<span class="t">${esc(text)}</span>`;
+  f.title=p.label;
+  // The list truncates and the header shows only the current file, so hovering
+  // writes the full path into the header instead of waiting on a tooltip.
+  f.onmouseenter=()=>{const n=el("name");
+    if(HOVER===null) HOVER=n.textContent;
+    n.textContent=p.label; n.title=p.label; n.classList.add("peek");};
+  f.onmouseleave=()=>{const n=el("name");
+    if(HOVER!==null){n.textContent=HOVER; n.title=HOVER; HOVER=null;}
+    n.classList.remove("peek");};
+  f.onclick=ev=>{ev.stopPropagation();
+    if(onlyNew && rec(p).reviewed){onlyNew=false;el("mode").textContent="all files";}
+    build();
+    const at=VIEW.findIndex(x=>x.id===p.id); if(at>=0){i=at;list();render();}};
+  return f;
+}
+//: One folder row -- name, then what is in it. Shared by the folder browser
+//: and the grouped search results so both report a folder the same way.
+function folderRow(name,arr,go){
+  let done=0,miss=0,note=0,bytes=0;
+  arr.forEach(p=>{const x=rec(p); if(x.reviewed)done++; note+=x.comments.length;
+    bytes+=p.lb||0; if(p.how==="missing")miss++;});
+  const base=name.split("/").length ? name : name;
+  const sub=new Set();
+  arr.forEach(p=>{const r=p.label.slice(name.length+1); const ix=r.indexOf("/");
+    if(ix>0) sub.add(r.slice(0,ix));});
+  const bits=[`${arr.length} file${arr.length===1?"":"s"}`];
+  if(done) bits.push(done===arr.length?"all reviewed":`${done} reviewed`);
+  else if(arr.length) bits.push(`${arr.length} to go`);
+  if(bytes) bits.push(kb(bytes)+(TOTB?` · ${Math.round(bytes*100/TOTB)}%`:""));
+  if(sub.size) bits.push(`${sub.size} folder${sub.size===1?"":"s"}`);
+  if(note) bits.push(`${note} comment${note===1?"":"s"}`);
+  if(miss) bits.push(`<span class="w">${miss} missing</span>`);
+  const d=document.createElement("div"); d.className="fold";
+  d.innerHTML=`<span class="ic">${done>=arr.length&&arr.length?ICON.done:ICON.folder}</span>
+    <span class="tx"><div class="n">${esc(name.split("/").pop())}</div>
+    <div class="m">${bits.join(" · ")}</div></span>`;
+  d.onclick=go;
+  return d;
+}
 function list(){
   const box=el("list"); box.innerHTML="";
-  const hits=pool().filter(matches);
-  const groups=new Map();
-  hits.forEach(p=>{const e=entOf(p); if(!groups.has(e))groups.set(e,[]); groups.get(e).push(p);});
-  // A search that matches files opens the folders holding them, so the hits
-  // are visible without a second click.
-  const auto = q() && groups.size<=12;
 
-  const add=(name,files,isAll)=>{
-    let done=0,miss=0,note=0,bytes=0;
-    files.forEach(p=>{const x=rec(p); if(x.reviewed) done++; note+=x.comments.length;
-      bytes+=p.lb||0; if(p.how==="missing") miss++; });
-    const full = done>=files.length && files.length>0;
-    // What is worth knowing per folder is how much of the app is on screen
-    // and how far through it you are. "5/920" answered neither: it read as
-    // 915 outstanding when 920 was already a sample of 28,035.
-    // For "Everything" the held-back count is the sum across apps, or the row
-    // claims the whole run is complete while each app under it says otherwise.
-    const more = isAll ? Object.values(THIN||{}).reduce((a,b)=>a+b,0)
-                       : ((THIN&&THIN[name])||0);
-    const left = files.length-done;
-    const bits = [];
-    if(more) bits.push(`${files.length} of ${files.length+more} sampled`);
-    else bits.push(`${files.length} file${files.length===1?"":"s"}`);
-    if(done) bits.push(done===files.length?"all reviewed":`${done} reviewed`);
-    else if(left) bits.push(`${left} to go`);
-    // Weight, and what share of the run it is. "100 files" says nothing about
-    // whether that is ten minutes or an afternoon.
-    if(bytes) bits.push(kb(bytes) + ((TOTB&&!isAll)?` · ${Math.round(bytes*100/TOTB)}%`:""));
-    if(note) bits.push(`${note} comment${note===1?"":"s"}`);
-    if(miss) bits.push(`<span class="w">${miss} missing</span>`);
-    const opened = isAll ? false : (OPEN===name || auto);
-    const d=document.createElement("div");
-    d.className="fold"; d.setAttribute("aria-current", isAll?(ENT===null):(ENT===name));
-    d.innerHTML=`<span class="ic">${isAll?ICON.all:(full?ICON.done:(opened?ICON.open:ICON.folder))}</span>
-      <span class="tx"><div class="n">${isAll?"Everything":esc(name)}</div>
-      <div class="m">${bits.join(" · ")}</div></span>`;
-    d.onclick=()=>{
-      if(isAll){ENT=null;OPEN=null;}
-      // Click toggles: a second click on the open folder closes it again.
-      else if(ENT===name && OPEN===name){OPEN=null;}
-      else {ENT=name;OPEN=name;}
-      i=0;build();list();render();
-    };
-    box.appendChild(d);
-    if(!isAll && opened) files.forEach(p=>{
-      const r=rec(p);
-      const cls = r.reviewed?"reviewed":(p.how==="missing"?"missing":(r.viewed?"viewed":""));
-      const f=document.createElement("div");
-      f.className="file"+(p.sampled===false?" extra":"");
-      f.setAttribute("aria-current", !!(VIEW[i]&&VIEW[i].id===p.id));
-      f.innerHTML=`<span class="dot ${cls}"></span><span class="ic">${fileIcon(restOf(p))}</span><span class="t">${esc(restOf(p))}</span>`;
-      f.title=p.label;
-      f.onclick=ev=>{ev.stopPropagation();
-        if(onlyNew && rec(p).reviewed){onlyNew=false;el("mode").textContent="all files";}
-        ENT=entOf(p); OPEN=ENT; build();
-        const at=VIEW.findIndex(x=>x.id===p.id); if(at>=0){i=at;list();render();}};
-      box.appendChild(f);
+  // Searching is a different question from browsing: show the matches from
+  // anywhere in the run, but GROUPED under the folder holding them, with the
+  // path inside that folder on each row. A flat list of full paths truncates
+  // to the same prefix over and over and tells you nothing.
+  if(q()){
+    const hits=pool().filter(matches);
+    const groups=new Map();
+    hits.forEach(p=>{const e=entOf(p); if(!groups.has(e))groups.set(e,[]); groups.get(e).push(p);});
+    [...groups.keys()].sort().forEach(name=>{
+      const arr=groups.get(name);
+      box.appendChild(folderRow(name,arr,()=>{CWD=[name];el("q").value="";
+        i=0;build();list();render();}));
+      arr.forEach(p=>box.appendChild(
+        fileRow(p, p.label.length>name.length ? p.label.slice(name.length+1) : p.label)));
     });
-  };
-  if(!q()) add("all", ALL, true);
-  [...groups.keys()].sort().forEach(n=>add(n,groups.get(n),false));
+    if(!hits.length){
+      const e=document.createElement("div"); e.className="none";
+      e.textContent="nothing matches that search"; box.appendChild(e);
+    }
+    return;
+  }
+
+  const {dirs,files}=kids(CWD);
+  const stat=arr=>{let done=0,miss=0,note=0,bytes=0;
+    arr.forEach(p=>{const x=rec(p); if(x.reviewed)done++; note+=x.comments.length;
+      bytes+=p.lb||0; if(p.how==="missing")miss++;});
+    return {done,miss,note,bytes,n:arr.length};};
+
+  // Breadcrumb. Every level is clickable, so getting back out is one click
+  // rather than a folder-by-folder climb.
+  const bc=document.createElement("div"); bc.className="crumb";
+  const seg=(txt,to)=>{const a=document.createElement("span");
+    a.className="cseg"; a.textContent=txt;
+    a.onclick=()=>{CWD=to; i=0; build(); list(); render();};
+    return a;};
+  bc.appendChild(seg("Everything",[]));
+  CWD.forEach((name,n)=>{
+    const sp=document.createElement("span"); sp.className="csep"; sp.textContent="/";
+    bc.appendChild(sp);
+    bc.appendChild(seg(name, CWD.slice(0,n+1)));
+  });
+  box.appendChild(bc);
+
+  // Up one level.
+  if(CWD.length){
+    const up=document.createElement("div"); up.className="fold up";
+    up.innerHTML='<span class="ic">&#8598;</span><span class="tx"><div class="n">..</div>'+
+                 '<div class="m">back to '+esc(CWD.length>1?CWD[CWD.length-2]:"Everything")+'</div></span>';
+    up.onclick=()=>{CWD=CWD.slice(0,-1); i=0; build(); list(); render();};
+    box.appendChild(up);
+  }
+
+  // No run-summary row. The header already carries "N viewed · N reviewed ·
+  // N files", so repeating it here was noise on top of the one thing the list
+  // is for: the folders.
+  // Folders first, then the files sitting directly here.
+  [...dirs.keys()].sort().forEach(name=>{
+    box.appendChild(folderRow(CWD.concat(name).join("/"), dirs.get(name),
+      ()=>{CWD=CWD.concat(name); i=0; build(); list(); render();}));
+  });
+
+  files.forEach(p=>box.appendChild(fileRow(p,p.label.split("/").pop())));
+
+  if(!dirs.size && !files.length){
+    const e=document.createElement("div"); e.className="none";
+    e.textContent = q() ? "nothing here matches that search" : "this folder is empty";
+    box.appendChild(e);
+  }
 }
+function snote(r){
+  const box=el("snote");
+  if(!q()||!r){box.classList.remove("on");box.textContent="";return;}
+  const bits=[`${num(r.matched)} of ${num(r.total)} files match`];
+  if(EXTRA.length) bits.push(`${num(EXTRA.length)} outside your sample`);
+  if(SMORE) bits.push(`showing the first ${num(r.rows.length)}`);
+  box.textContent=bits.join(" · ");
+  box.classList.add("on");
+}
+
+function folders(){return [...new Set(pool().filter(matches).map(entOf))].sort();}
 el("q").addEventListener("input",()=>{
   i=0;build();list();render();
   clearTimeout(SQ); SQ=setTimeout(search,200);
@@ -1298,22 +1442,17 @@ async function search(){
   snote(r);
   build(); list(); render();
 }
-function snote(r){
-  const box=el("snote");
-  if(!q()||!r){box.classList.remove("on");box.textContent="";return;}
-  const bits=[`${num(r.matched)} of ${num(r.total)} files match`];
-  if(EXTRA.length) bits.push(`${num(EXTRA.length)} outside your sample`);
-  if(SMORE) bits.push(`showing the first ${num(r.rows.length)}`);
-  box.textContent=bits.join(" · ");
-  box.classList.add("on");
-}
 
-function folders(){return [...new Set(pool().filter(matches).map(entOf))].sort();}
 function stepFolder(d){
-  const ns=folders(); if(!ns.length)return;
-  const at=ns.indexOf(ENT);
+  // Siblings at the depth you are standing at. Stepping to a TOP-level folder
+  // from three levels down, which is what the old entOf-based version did once
+  // navigation gained depth, is not "next folder".
+  const up=CWD.slice(0,-1);
+  const ns=[...kids(up).dirs.keys()].sort();
+  if(!ns.length)return;
+  const at=ns.indexOf(CWD[CWD.length-1]);
   const n = at<0 ? (d>0?0:ns.length-1) : Math.min(ns.length-1,Math.max(0,at+d));
-  ENT=ns[n]; OPEN=ENT; i=0; build(); list(); render();
+  CWD=up.concat(ns[n]); i=0; build(); list(); render();
   const cur=el("list").querySelector('.fold[aria-current=true]');
   if(cur) cur.scrollIntoView({block:"nearest"});
 }
@@ -1405,20 +1544,83 @@ function step_page(d){
   el("lp").innerHTML="";el("lp").appendChild(iframeFor("left",p.id));
   if(p.right){el("rp").innerHTML="";el("rp").appendChild(iframeFor("right",p.id));}
 }
+/* Documents already fetched, and the ones we expect to want next.
+   Keyed side/id, values are the in-flight PROMISE so two requests for the same
+   document collapse into one. Bounded, oldest evicted -- a run is thousands of
+   files and every payload is the whole rendered document. */
+//: Documents fetched or in flight, keyed side/id. The entry carries its own
+//: resolution flag: DOCC membership alone means "requested", and using that as
+//: "ready" is what made the shimmer skip while the old pane was still up.
+//: Small on purpose -- prefetch only ever reaches i-1..i+2, and each entry
+//: retains a whole rendered document.
+const DOCC=new Map(), DOCMAX=8;
+function dkey(side,id){return side+"/"+id;}
+function docFetch(side,id){
+  const k=dkey(side,id);
+  // Re-insert on a hit so eviction is by recency, not first-seen -- otherwise
+  // the document on screen can be dropped while a stale prefetch survives.
+  if(DOCC.has(k)){const e=DOCC.get(k); DOCC.delete(k); DOCC.set(k,e); return e.p;}
+  const e={ready:false};
+  e.p=fetch("/api/doc/"+side+"/"+id).then(r=>r.json())
+    .then(m=>{e.ready=true;return m;})
+    .catch(err=>{DOCC.delete(k);throw err;});
+  if(DOCC.size>=DOCMAX) DOCC.delete(DOCC.keys().next().value);
+  DOCC.set(k,e);
+  return e.p;
+}
+/* Fetch what the reviewer is about to ask for. j/Enter walks forward, so the
+   next two are the high-value guesses; the previous one covers a k. Fired on
+   idle so it never competes with painting the document actually on screen. */
+function prefetch(){
+  // Reads i when it RUNS, not when it was scheduled: an idle callback that
+  // fires after two more j presses would otherwise warm the neighbours of a
+  // document already left behind. One document ahead only -- server-side
+  // rendering is serialised behind a single lock, so a wider window queues
+  // ahead of the document actually on screen and makes the wait longer.
+  const run=()=>{const p=VIEW[i+1]; if(!p)return;
+    docFetch("left",p.id).catch(()=>{});
+    if(p.right&&!SOLO) docFetch("right",p.id).catch(()=>{});};
+  (window.requestIdleCallback||(f=>setTimeout(f,120)))(run);
+}
+function shimmer(box){
+  box.innerHTML="<div class='shim'><b></b>"+"<i></i>".repeat(14)+"</div>";
+}
 async function panes(p){
   const seq=++SEQ; LS=RS=null; PAGE=1;
+  // Clear FIRST. The old pane used to stay up for the whole round trip, which
+  // read as "Enter did nothing" or, worse, as the same file twice.
+  // A prefetched document is already here: paint it without the shimmer, so a
+  // hit is indistinguishable from instant.
+  // DOCC.has() is true the moment a PREFETCH STARTS, not when it lands. Using
+  // it to decide meant an in-flight prefetch counted as warm, the shimmer was
+  // skipped, and the previous document stayed on screen until the fetch
+  // finished -- which is exactly the "loader sometimes does not come" report.
+  // Only a RESOLVED document is warm.
+  // One predicate for "is there a second pane", used by the shimmer, the fetch
+  // and the paint alike. Solo pairs a tree with itself, so p.right is always
+  // truthy and every document was being fetched, rendered and cached TWICE for
+  // a section CSS hides.
+  const wantRight = !!p.right && !SOLO;
+  const warm=(DOCC.get(dkey("left",p.id))||{}).ready===true;
+  if(!warm){ shimmer(el("lp")); if(wantRight) shimmer(el("rp")); }
   let lm={kind:"other",why:"could not ask the server about this document"},rm={kind:"none"};
   if(CAN){ try{
-    lm=await (await fetch("/api/doc/left/"+p.id)).json();
-    if(p.right) rm=await (await fetch("/api/doc/right/"+p.id)).json();
+    // Both sides at once. Sequential awaits made every document cost two round
+    // trips end to end.
+    const [lr,rr]=await Promise.all([
+      docFetch("left",p.id),
+      wantRight?docFetch("right",p.id):Promise.resolve({kind:"none"}),
+    ]);
+    lm=lr; rm=rr;
   }catch(e){} }
   if(seq!==SEQ) return;                 // a slower answer for a document already left behind
   LS=build_pane(el("lp"),"left",p.id,lm);
-  if(p.right) RS=build_pane(el("rp"),"right",p.id,rm);
-  else el("rp").innerHTML="<div class='empty'><b>Nothing in the output for this document.</b><br>"+
+  if(wantRight) RS=build_pane(el("rp"),"right",p.id,rm);
+  else if(!SOLO) el("rp").innerHTML="<div class='empty'><b>Nothing in the output for this document.</b><br>"+
         "Either the run withheld it, or it was never processed.</div>";
   if(lm.kind==="records"&&rm.kind==="records") alignRecords(LS,RS);
   linkScroll(LS,RS);
+  prefetch();
 }
 
 /* Record N starts at the same height on both sides.
@@ -1799,6 +2001,15 @@ addEventListener("keydown",e=>{
     return;
   }
   if(el("app").style.display==="none")return;
+  // Cmd/Ctrl+Shift+F jumps to the search box from anywhere, including from
+  // inside another field -- so it is checked BEFORE the input bail-out and
+  // before modifiers are rejected.
+  if((e.metaKey||e.ctrlKey)&&e.shiftKey&&(e.key==="F"||e.key==="f")){
+    e.preventDefault();
+    if(el("body").classList.contains("narrow")) toggleSide();
+    const box=el("q"); box.focus(); box.select();
+    return;
+  }
   if(e.target.tagName==="INPUT"||e.target.tagName==="SELECT"){
     if(e.key==="Escape") e.target.blur();
     return;
@@ -1830,10 +2041,34 @@ addEventListener("keydown",e=>{
    "  right / left  next / previous folder\\n  ] / [         both panes one page\\n\\n"+
    "Mark\\n  r             reviewed on or off\\n  c             add a comment\\n\\n"+
    "View\\n  a             all files / unreviewed only\\n  s             show or hide the list\\n"+
-   "  y             scroll sync on or off\\n  /             search\\n  e             change what is compared\\n\\n"+
+   "  y             scroll sync on or off\\n  /  or  \u2318\u21e7F   search\\n  e             change what is compared\\n\\n"+
    "Check\\n  n             what every folder name became\\n  m             the run\u2019s PII mappings\\n"+
    "  i             details for this document");}
 });
+
+/* Resizing the list. Written to the grid variable live so the panes reflow as
+   you drag, and remembered per browser. */
+(function(){
+  const g=el("grip"), bd=el("body");
+  const SW="pii-review.sidewidth";
+  const set=w=>{w=Math.max(170,Math.min(760,Math.round(w)));
+    bd.style.setProperty("--sw",w+"px"); return w;};
+  const saved=parseInt(localStorage.getItem(SW)||"",10);
+  if(saved) set(saved);
+  let on=false, x0=0, W=saved||250;
+  g.addEventListener("mousedown",e=>{on=true;x0=bd.getBoundingClientRect().left;
+    g.classList.add("on");document.body.classList.add("rz");e.preventDefault();});
+  // The rect is read once per drag, not per mousemove: reading it in the move
+  // handler forces a synchronous layout of a pane holding thousands of rows.
+  addEventListener("mousemove",e=>{if(on) W=set(e.clientX-x0);});
+  addEventListener("mouseup",()=>{if(!on)return;on=false;g.classList.remove("on");
+    document.body.classList.remove("rz");localStorage.setItem(SW,W);});
+  // Double-click fits the widest name currently listed.
+  g.addEventListener("dblclick",()=>{
+    const w=Math.max(...[...document.querySelectorAll("#list .file .t")]
+      .map(n=>n.scrollWidth+96), 250);
+    W=set(w); localStorage.setItem(SW,W);});
+})();
 
 fetch("/api/boot").then(r=>r.json()).then(b=>{
   CAN=!!b.render;
@@ -1848,6 +2083,14 @@ fetch("/api/boot").then(r=>r.json()).then(b=>{
 
 def _sides(root, left, right, profile, source, output):
     """Resolve the request into (left_store, right_store, filters)."""
+    if left and right and left == right:
+        # --single points both halves at one tree. Opening it twice builds two
+        # Stores, lists it twice (paths is a per-instance cached_property), and
+        # runs find_variants twice -- which on a tree carrying both raw/ and
+        # files/ fails with "pick the two halves there" for a review that has
+        # only one half by definition.
+        st = stores.open_store(resolve_root(left), profile)
+        return st, st, {}
     if root:
         # A location pasted from the console usually points at the output
         # half. Both halves are one level up.
@@ -2008,7 +2251,8 @@ def _kept_names(left: str, right: str | None, ign: set) -> list[str]:
 def open_review(root=None, left=None, right=None, profile=None,
                 source=None, output=None, ignore=None, label=None,
                 per_app: int = PER_APP, mappings: str | None = None,
-                seed: str | None = None) -> dict:
+                seed: str | None = None, solo: bool = False,
+                solo_label: str = "Transformed") -> dict:
     ls, rs, filt = _sides(root, left, right, profile, source, output)
     ign = {s.strip().lower() for s in (ignore or pairing.DEFAULT_IGNORE) if s.strip()}
     ign |= {s.lower() for s in (source, output) if s}
@@ -2051,9 +2295,15 @@ def open_review(root=None, left=None, right=None, profile=None,
     # once here and audited in its own panel.
     left_dirs = {pairing.normalise(p, ign)[:-1]
                  for p in idx["unmatched_left"] + idx["out_of_scope"]}
-    folders = pairing.folder_map(idx["pairs"], ign, left_dirs, partial)
+    # Same reason: the folder-name audit is a before/after, and single mode has
+    # no before.
+    folders = [] if solo else pairing.folder_map(idx["pairs"], ign, left_dirs, partial)
     for r in rows:
-        r["kept"] = _kept_names(r["left"], r["right"], ign)
+        # In single mode left IS right, so every personal-looking segment reads
+        # as "unchanged in the output" and the tool's own leak hint fires on
+        # every document. There is no output half to have changed it: say
+        # nothing rather than something untrue.
+        r["kept"] = [] if solo else _kept_names(r["left"], r["right"], ign)
 
     rows.sort(key=lambda r: r["label"])
     # Numbered over EVERY pair, before the sample is taken, and the whole set
@@ -2167,6 +2417,7 @@ def open_review(root=None, left=None, right=None, profile=None,
         return folder or Path(str(store).split(":", 1)[-1].rstrip("/")).name or str(store)
 
     session = {"pairs": rows, "marks": marks, "counts": counts,
+               "solo": bool(solo), "solo_label": solo_label,
                "total": len(every),
                "left": S["left"], "right": S["right"], "hint": hint,
                "scope_note": scope_note,
@@ -2607,9 +2858,22 @@ def main():
     ap.add_argument("--seed", help="sample to use instead of this machine's own. "
                                    "Pass a colleague's to review exactly what "
                                    "they are reviewing.")
+    ap.add_argument("--single", metavar="LOCATION",
+                    help="review ONE tree on its own -- no source half, one "
+                         "pane. For eyeballing transformed/processed data "
+                         "where there is nothing to compare it against.")
+    ap.add_argument("--single-label", default="Transformed",
+                    help="heading for the single pane (default: Transformed)")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-open", action="store_true")
     a = ap.parse_args()
+
+    # One tree, one pane. Pairing a location with ITSELF makes every document
+    # match itself by exact name, so the index is one row per file and the
+    # right pane has nothing to add -- which is what `solo` hides.
+    if a.single:
+        a.left = a.right = a.single
+        a.label = a.label or _name_for(a.single)
 
     jobs = plan(a)
     if len(jobs) > 1:
@@ -2634,7 +2898,8 @@ def main():
     if a.root or (a.left and a.right):
         open_review(root=a.root, left=a.left, right=a.right, profile=a.profile,
                     label=a.label, mappings=a.mappings, seed=a.seed,
-                    source=a.source, output=a.output)
+                    source=a.source, output=a.output,
+                    solo=bool(a.single), solo_label=a.single_label)
 
     url = f"http://127.0.0.1:{a.port}/"
     print(f"\n  {url}\n", flush=True)
