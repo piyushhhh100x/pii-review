@@ -10,6 +10,7 @@ from __future__ import annotations
 import concurrent.futures as cf
 import functools
 import io
+import os
 import random
 import re
 import subprocess
@@ -325,7 +326,8 @@ class S3Store(Store):
             self._client = None
 
     def _aws(self, *args: str) -> bytes:
-        cmd = ["aws"] + (["--profile", self.profile] if self.profile else []) \
+        executable = "aws.cmd" if os.name == "nt" else "aws"
+        cmd = [executable] + (["--profile", self.profile] if self.profile else []) \
             + (["--region", self.region] if self.region else []) + list(args)
         done = subprocess.run(cmd, capture_output=True)
         if done.returncode != 0:
