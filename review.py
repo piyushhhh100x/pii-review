@@ -2396,7 +2396,7 @@ addEventListener("keydown",e=>{
 })();
 
 fetch("/api/boot").then(r=>r.json()).then(b=>{
-  CAN=!!b.render;
+  CAN=true;
   const box=el("recent"); box.innerHTML="";
   (b.recent||[]).slice(0,3).forEach(v=>{const d=document.createElement("div");
     d.className="recent";d.textContent="↩ "+v;
