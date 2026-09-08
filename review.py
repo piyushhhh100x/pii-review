@@ -520,10 +520,10 @@ def view(key: str, data: bytes) -> dict:
     import html as _html
     ext = Path(key).suffix.lower()
     # A zero-byte object is not a rendering failure. Runs ship empty
-    # placeholders -- 103 of the 1,128 objects in one github export -- and an
-    # empty pane is indistinguishable from a broken viewer, so this reads as
-    # "the highlighting is gone" when there is simply nothing there. Say so,
-    # and do not offer a download of nothing.
+    # placeholders -- 118 of 200 sampled pairs in one export -- and an empty
+    # pane is indistinguishable from a broken viewer, so it reads as "the
+    # highlighting is gone" when there is simply nothing there. Say so, and do
+    # not offer a download of nothing.
     if not data:
         return {"kind": "empty"}
     if ext == ".pdf":
@@ -672,6 +672,309 @@ NOTES = HERE / "map_notes.json"
 #: Mappings on screen at once. Enough that scrolling is the normal way to move
 #: through a type and the pager is for jumping, not for reading.
 PAGE_ROWS = 200
+
+
+_PII_IDX: dict[str, dict] = {}
+
+
+def _vocab_split(s: str) -> list[str]:
+    """Lowercased tokens, by the same rule on a mapping and on a document.
+
+    Deliberately not ``_tokens``: that one drops anything three characters or
+    shorter, and a first name is the anchor a whole mapping is found by.
+    """
+    return [t for t in re.split(r"[^A-Za-z0-9@._+-]+", s.lower()) if t]
+
+
+def pii_index(src, profile=None, store=None, inner=None) -> dict:
+    """Every mapping the run made, indexed by the first token of its value.
+
+    The panes are highlighted by shipping the client a list of values to look
+    for, and a real run has far too many to ship all of them -- the 95-user MSL
+    run has 392,811 mappings, and a regex of 392k alternatives is neither
+    sendable nor runnable in a browser.
+
+    Capping that list is what broke highlighting outright: the cap kept the
+    LONGEST values, and the longest values in a mail export are all tracking
+    URLs, so the 6,000 that were sent were 6,000 links and every name, email
+    and phone number fell off the end. 260k of the 392k rows are 3-20
+    characters long -- the entire readable vocabulary was the part discarded,
+    which is why a pane full of substituted names showed no marks at all.
+
+    So the cap is gone and the vocabulary is scoped to the document instead:
+    index every value by its first token once, then intersect that index with
+    the tokens of the document actually on screen. What reaches the client is
+    a few hundred strings that are genuinely in front of the reviewer.
+    """
+    key = f"{src}::{inner}"
+    hit = _PII_IDX.get(key)
+    if hit is not None:
+        return hit
+    out = read_mappings(src, profile, store, inner)
+    orig: dict[str, list[str]] = {}
+    repl: dict[str, list[str]] = {}
+    leak: dict[str, list[str]] = {}
+    for row in out["rows"]:
+        if row.get("deleted"):
+            continue
+        a = (row.get("original") or "").strip()
+        b = (row.get("replacement") or "").strip()
+        # Two characters matches half the corpus.
+        if len(a) < 3:
+            continue
+        ta = _vocab_split(a)
+        if not ta:
+            continue
+        if b:
+            orig.setdefault(ta[0], []).append(a)
+            tb = _vocab_split(b)
+            if len(b) >= 3 and tb:
+                repl.setdefault(tb[0], []).append(b)
+        else:
+            # Detected and left alone: the value is still in the deliverable
+            # verbatim, so it is marked on both panes and in red.
+            leak.setdefault(ta[0], []).append(a)
+    hit = {"orig": orig, "repl": repl, "leak": leak, "count": out["count"]}
+    _PII_IDX[key] = hit
+    while len(_PII_IDX) > PII_IDX_KEEP:
+        _PII_IDX.pop(next(iter(_PII_IDX)))
+    return hit
+
+
+#: How many runs' indexes to keep. A 95-user run's mapping databases are ~99 MB
+#: on disk between them, and an index of every user at once is not something a
+#: laptop should be asked to hold. Reviewing walks through one user at a time,
+#: so the last few are the only ones that get asked for again.
+PII_IDX_KEEP = 4
+
+_MAP_PICK: dict[tuple, str | None] = {}
+
+#: Where one user's mapping database sits under a run-wide location. Both
+#: layouts this run produced: flat, one file per user, and a folder per user
+#: with the pipeline's own filename inside it.
+MAP_PER_USER = ("{base}/{user}.db", "{base}/{user}/pii_mappings.db",
+                "{base}/{user}/mappings.db")
+
+
+def resolve_map(spec: str, profile: str | None, user: str | None) -> str | None:
+    """The mapping database for one user's documents.
+
+    A multi-user run does not have one mapping table, it has one PER USER --
+    every user is processed on its own cluster with its own mapping database,
+    and two users' tables are not interchangeable. Pointing the reviewer at a
+    single database silently gives no marks on every user that database does
+    not cover, which reads exactly like highlighting being broken. So a
+    ``--mappings`` that names a FOLDER (or an S3 prefix) is resolved per
+    document instead, and one that names a .db is used as given.
+    """
+    if not spec:
+        return None
+    if spec.lower().endswith((".db", ".sqlite", ".sqlite3")):
+        return spec
+    if not user:
+        return None
+    key = (spec, user)
+    if key in _MAP_PICK:
+        return _MAP_PICK[key]
+    base = spec.rstrip("/")
+    pick = None
+    for tmpl in MAP_PER_USER:
+        cand = tmpl.format(base=base, user=user)
+        if stores.parse_s3(cand):
+            # No HEAD on the store, so the read IS the test -- and it is
+            # cached, so a hit costs one request rather than two.
+            try:
+                read_mappings(cand, profile)
+            except Exception:  # noqa: BLE001 -- absence is the expected answer
+                continue
+            pick = cand
+            break
+        if Path(cand).expanduser().exists():
+            pick = cand
+            break
+    _MAP_PICK[key] = pick
+    return pick
+
+
+#: Values sent to the client for one document. Scoped per document this is
+#: never reached in practice; it is here so that one pathological file cannot
+#: hand the browser a regex it will not finish.
+PII_MAX = 4000
+
+
+def pii_for(idx: dict, name: str, text: str) -> list[str]:
+    """The indexed values that really occur in ``text``.
+
+    Two passes, because 392k substring tests against a document is far too
+    slow to run on every keypress: the token set prunes the candidates down to
+    the handful that could possibly match, and only those are checked in full.
+    Case-insensitively -- the rewriter preserves the source cell's casing, so a
+    mapping stored as "Optory Labs" is written out as "OPTORY LABS".
+    """
+    if not text:
+        return []
+    book = idx.get(name) or {}
+    low = text.lower()
+    seen: set[str] = set()
+    for t in set(_vocab_split(text)):
+        for v in book.get(t, ()):
+            if v not in seen and v.lower() in low:
+                seen.add(v)
+    # Longest first, so a surname is not eaten by a match on the first name.
+    return sorted(seen, key=len, reverse=True)[:PII_MAX]
+
+
+#: How many pairs to learn the run's vocabulary from before the reviewer
+#: arrives. Enough that the first document already has signal; small enough
+#: that it finishes while the first page renders.
+DERIVE_WARM = 60
+
+_DERIVED = {"orig": set(), "repl": set(), "seen": set(), "warm": False}
+_DERIVE_LOCK = threading.Lock()
+
+#: Ordinary words are not identifiers. One generic filter rather than a rule
+#: per PII type: an over-scrubbing run rewrites words inside prose too, so
+#: "improvements" and "workspace" enter the learned vocabulary exactly as
+#: "bankonjuno" does, and only this tells them apart.
+WORDS_FILE = "/usr/share/dict/words"
+_WORDS: set[str] | None = None
+
+
+def _words() -> set[str]:
+    global _WORDS
+    if _WORDS is None:
+        try:
+            with open(WORDS_FILE, encoding="utf8", errors="replace") as fh:
+                _WORDS = {w.strip().lower() for w in fh if len(w.strip()) > 2}
+        except OSError:
+            _WORDS = set()          # no wordlist on this box; marks get noisier
+    return _WORDS
+
+
+#: The system wordlist is Webster's, so it holds base forms only - "process"
+#: but not "processing", "improvement" but not "improvements". Reducing a
+#: token before the lookup is what makes it usable.
+_SUFFIXES = ("s", "es", "ed", "d", "ing", "ly", "er", "ers", "est", "ion", "ions")
+
+
+def _is_word(tok: str) -> bool:
+    words = _words()
+    if not words:
+        return False
+    if tok in words:
+        return True
+    for suf in _SUFFIXES:
+        if tok.endswith(suf) and len(tok) - len(suf) >= 3:
+            stem = tok[:-len(suf)]
+            if stem in words or (stem + "e") in words or stem[:-1] in words:
+                return True
+    # A compound of two words is still language: "workspace", "feedback".
+    return any(tok[:i] in words and tok[i:] in words
+               for i in range(3, len(tok) - 2))
+
+
+def _identifierish(tok: str) -> bool:
+    """Could this token name somebody or something, rather than be language?
+
+    Anything carrying structure - a digit, an @, a dot, a hyphen - is not a
+    word regardless of the dictionary. Everything else has to not be one.
+    """
+    if any(c in tok for c in "@._+-") or any(c.isdigit() for c in tok):
+        return True
+    if len(tok) < 4:
+        return False        # no structure and this short is language, not a name
+    return not _is_word(tok)
+
+
+def _learn(sid: str, lt: str, rt: str) -> None:
+    """Fold one pair's delta into what this run is known to rewrite.
+
+    No pattern list. The two panes are the same document before and after, so
+    a token on the left and gone on the right IS a value this pipeline treats
+    as PII -- whatever type it happens to be. A UAN, a badge number, a room
+    name: if the run rewrites it anywhere, it is in the vocabulary, and no
+    code had to learn what one looks like.
+    """
+    left, right = set(_vocab_split(lt)), set(_vocab_split(rt))
+    with _DERIVE_LOCK:
+        if sid in _DERIVED["seen"]:
+            return
+        _DERIVED["seen"].add(sid)
+        _DERIVED["orig"] |= {v for v in left - right if len(v) >= 3}
+        _DERIVED["repl"] |= {v for v in right - left if len(v) >= 3}
+
+
+def warm_derived(S) -> None:
+    """Learn from the first pairs in the background, once.
+
+    Leaks are found by comparing this document against what the run did
+    elsewhere, so the vocabulary has to come from more than the document on
+    screen. Reading a bounded sample up front means document one already has
+    marks; every document the reviewer opens then adds to it.
+    """
+    with _DERIVE_LOCK:
+        if _DERIVED["warm"]:
+            return
+        _DERIVED["warm"] = True
+
+    def run():
+        for i, row in enumerate(S["rows"]):
+            if len(_DERIVED["seen"]) >= DERIVE_WARM:
+                return
+            if not (row.get("left") and row.get("right")):
+                continue
+            try:
+                sid = str(i)
+                _learn(sid,
+                       _doc_text("left", sid, row["left"], S["left_store"]),
+                       _doc_text("right", sid, row["right"], S["right_store"]))
+            except Exception:      # noqa: BLE001 - a warm-up miss is not fatal
+                continue
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _rank(values) -> list:
+    """Longest first, capped so the client regex stays runnable."""
+    return sorted({v for v in values if len(v) >= 3}, key=len, reverse=True)[:PII_MAX]
+
+
+def derive_pii(sid: str, lt: str, rt: str) -> dict:
+    """Highlights with no mapping database, from the run's own behaviour.
+
+    Three questions, none of which needs to know what PII looks like:
+
+      left-only   this document, a value the run rewrote here
+      right-only  this document, the surrogate it wrote in
+      both panes AND rewritten somewhere else in this run -> a leak
+
+    The third is the one worth having. It catches inconsistent redaction --
+    an org name substituted in one file and left verbatim in the next -- which
+    is the defect a pattern matcher cannot see, because the value looks like
+    ordinary text. It costs no per-type code and improves as the reviewer
+    moves through the run.
+
+    Weaker than a mapping table: it marks tokens rather than whole values, and
+    a value the run never rewrote anywhere is invisible to it. It is what
+    there is when no pii_mappings.db shipped, and no marks is worse.
+    """
+    lt, rt = lt or "", rt or ""
+    left, right = set(_vocab_split(lt)), set(_vocab_split(rt))
+    if lt and rt:
+        _learn(sid, lt, rt)
+    with _DERIVE_LOCK:
+        known = set(_DERIVED["orig"])
+    if not (lt and rt):
+        # One pane: no delta to take, so everything the run is known to
+        # rewrite becomes the thing to look for here.
+        here = left or right
+        return {"orig": [], "repl": [],
+                "leak": _rank(v for v in known & here if _identifierish(v)),
+                "derived": True, "learned": len(known)}
+    return {"orig": _rank(left - right),
+            "repl": _rank(right - left),
+            "leak": _rank(v for v in known & left & right if _identifierish(v)),
+            "derived": True, "learned": len(known)}
 
 
 def map_key(row: dict) -> str:
@@ -1242,12 +1545,6 @@ function start(r){
   if(r.hint){el("btext").textContent=r.hint.text;el("bfix").textContent="use "+r.hint.output+"/";
     el("bfix").onclick=()=>{el("out").value=r.hint.output;el("banner").classList.remove("on");open_();};
     el("bfix").style.display=""; el("banner").classList.add("on");}
-  else if(r.scope_note){
-    // Not a warning and not something to fix -- a fact about what the chosen
-    // location covers. It carries no button, because there is nothing here
-    // the reviewer got wrong.
-    el("btext").textContent=r.scope_note; el("bfix").style.display="none";
-    el("banner").classList.add("on");}
   else el("banner").classList.remove("on");
   OPENP=new Set();i=0;
   build(); list();
@@ -1580,92 +1877,46 @@ function rxOf(list){
   // "OPTORY LABS" and an exact match silently never fires.
   try{ return new RegExp("("+body+")","gi"); }catch(e){ return null; }
 }
-function fallbackRx(){
-  // Verification samples may not ship pii_mappings.db. Keep common PII
-  // visible in that case rather than silently disabling highlighting.
-  return /([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|(?:\+\d{1,3}[ .-])?(?:\(\d{3}\)|\d{3})[ .-]\d{3}[ .-]\d{4}|\b\d{3}-\d{2}-\d{4}\b)/gi;
-}
-async function loadPii(){
+async function loadPii(id){
+  // Per document, not once at startup: the run-wide vocabulary is hundreds of
+  // thousands of values and only the ones in this document can ever match.
+  PIIRX={orig:null,repl:null,leak:null}; PIIDERIVED=false;
   try{
-    const d=await (await fetch("/api/pii")).json();
-    const hasMappings=(d.orig&&d.orig.length)||(d.repl&&d.repl.length)||(d.leak&&d.leak.length);
-    const fallback=hasMappings?null:fallbackRx();
-    PIIRX.orig=rxOf(d.orig)||fallback;
-    PIIRX.repl=rxOf(d.repl)||fallback;
-    PIIRX.leak=rxOf(d.leak);
+    const d=await (await fetch("/api/pii?sid="+encodeURIComponent(id))).json();
+    PIIRX.orig=rxOf(d.orig); PIIRX.repl=rxOf(d.repl); PIIRX.leak=rxOf(d.leak);
+    PIIDERIVED=!!d.derived;
   }catch(e){}
+  hilLabel();
 }
-/* No pii_mappings.db shipped with the run. The substitutions are still
-   recoverable, because the two panes are the same document before and after
-   the rewriter ran: a value that differs between them IS a substitution, the
-   left one the original and the right one its replacement. This is what
-   catches the PII no pattern can -- an org, a login, a repo, a display name --
-   which on a github export is most of it. Diffed per token rather than per
-   value, so "DiveHQ" lights up inside the URL it sits in rather than the whole
-   URL going amber. */
-function piiTokens(s){ return s.split(/([^A-Za-z0-9_.+@-]+)/); }
-function textNodes(root){
-  const w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,null);
-  const out=[]; let n; while((n=w.nextNode())) out.push(n.nodeValue);
-  return out;
+var PIIDERIVED=false;
+function hilLabel(){
+  // Derived marks come from diffing the panes, not from the run's own mapping
+  // table. Say which, every time -- a reviewer treating a guess as authority
+  // is the one failure this feature could introduce.
+  const e=el("hil"); if(!e) return;
+  e.textContent = !HILITE ? "pii off" : (PIIDERIVED ? "pii derived" : "pii on");
+  e.title = PIIDERIVED
+    ? "No pii_mappings.db for this user \u2014 marks are derived by diffing the two panes: left-only = replaced, right-only = surrogate, red = PII-shaped and present in BOTH  (h)"
+    : "highlight PII  (h)";
 }
-function diffTokens(a,b,orig,repl){
-  const A=piiTokens(a), Bb=piiTokens(b), m=A.length, n=Bb.length;
-  // A rewritten blob can be thousands of tokens; the table is O(m*n) and the
-  // pane must not stall for one pathological value.
-  if(m*n>40000) return;
-  const L=[]; for(let i=0;i<=m;i++) L.push(new Int32Array(n+1));
-  for(let i=m-1;i>=0;i--) for(let j=n-1;j>=0;j--)
-    L[i][j] = A[i]===Bb[j] ? L[i+1][j+1]+1 : Math.max(L[i+1][j], L[i][j+1]);
-  let i=0,j=0,ra=[],rb=[];
-  const flush=()=>{
-    const x=ra.join("").trim(), y=rb.join("").trim();
-    if(x.length>2) orig.push(x);
-    if(y.length>2) repl.push(y);
-    ra=[]; rb=[];
-  };
-  while(i<m&&j<n){
-    if(A[i]===Bb[j]){ flush(); i++; j++; }
-    else if(L[i+1][j]>=L[i][j+1]) ra.push(A[i++]);
-    else rb.push(Bb[j++]);
-  }
-  while(i<m) ra.push(A[i++]);
-  while(j<n) rb.push(Bb[j++]);
-  flush();
-}
-function diffPii(ls,rs){
-  if(!ls||!rs) return null;
-  const a=textNodes(ls), b=textNodes(rs);
-  // Positional compare only when the two sides rendered the same shape. A
-  // record the output dropped or added shifts everything after it, and a
-  // shifted compare would call every remaining value a substitution.
-  if(!a.length||a.length!==b.length) return null;
-  const orig=[], repl=[];
-  for(let k=0;k<a.length;k++) if(a[k]!==b[k]) diffTokens(a[k],b[k],orig,repl);
-  if(!orig.length&&!repl.length) return null;
-  // A rewritten commit hash is churn, not PII -- forty hex characters swapped
-  // for forty others, on every commit in the file -- and marking them buries
-  // the values that matter. Nothing else is filtered: a scrubbed field name
-  // ("received_events" -> "received_orboraion") is over-redaction, which is a
-  // finding in its own right and belongs on screen.
-  const churn=v=>/^[0-9a-f]{7,}$/i.test(v);
-  const uniq=l=>[...new Set(l)].filter(v=>!churn(v))
-                               .sort((x,y)=>y.length-x.length);
-  const O=uniq(orig), R=uniq(repl);
-  if(!O.length&&!R.length) return null;
-  return {orig:rxOf(O), repl:rxOf(R), leak:null};
-}
-function mark(root,side,dyn){
+function mark(root,side){
   if(!root||!HILITE) return;
-  // The diffed pairs beat the pattern fallback when both are available: they
-  // are this document's actual substitutions rather than a guess at what PII
-  // looks like.
-  const P = dyn || PIIRX;
   // Leaks are marked on BOTH panes: the value was detected and NOT replaced,
   // so it is sitting in the output unchanged, and seeing it red on the right
   // is the whole point.
   paint(root, PIIRX.leak, "leak");
-  paint(root, side==="left" ? P.orig : P.repl, side);
+  if(SOLO){
+    // One pane, and it can be either half of a run: an input tree where the
+    // originals are expected, or a delivered output where a surviving
+    // original IS the finding. Mark both vocabularies and let the colours say
+    // which it is -- green means a value was substituted here, amber means an
+    // original is present. Reviewing a delivery whose "before" is not
+    // readable is the case this exists for.
+    paint(root, PIIRX.repl, "right");
+    paint(root, PIIRX.orig, "left");
+    return;
+  }
+  paint(root, side==="left" ? PIIRX.orig : PIIRX.repl, side);
 }
 function paint(root,rx,cls){
   if(!root||!rx) return;
@@ -1712,6 +1963,7 @@ function shimmer(box){
 }
 async function panes(p){
   const seq=++SEQ; LS=RS=null; PAGE=1;
+  PIIRX={orig:null,repl:null,leak:null};   // never inherit the last document's
   // Clear FIRST. The old pane used to stay up for the whole round trip, which
   // read as "Enter did nothing" or, worse, as the same file twice.
   // A prefetched document is already here: paint it without the shimmer, so a
@@ -1729,26 +1981,24 @@ async function panes(p){
   const warm=(DOCC.get(dkey("left",p.id))||{}).ready===true;
   if(!warm){ shimmer(el("lp")); if(wantRight) shimmer(el("rp")); }
   let lm={kind:"other",why:"could not ask the server about this document"},rm={kind:"none"};
-  // Text and structured documents do not depend on the optional PDF renderer.
-  // Always fetch the document metadata; PDF rendering is handled by build_pane.
-  try{
+  if(CAN){ try{
     // Both sides at once. Sequential awaits made every document cost two round
     // trips end to end.
     const [lr,rr]=await Promise.all([
       docFetch("left",p.id),
       wantRight?docFetch("right",p.id):Promise.resolve({kind:"none"}),
+      // Which values to look for depends on which document this is, so it
+      // rides along with the document rather than costing a second wait.
+      loadPii(p.id),
     ]);
     lm=lr; rm=rr;
-  }catch(e){} 
+  }catch(e){} }
   if(seq!==SEQ) return;                 // a slower answer for a document already left behind
   LS=build_pane(el("lp"),"left",p.id,lm);
   if(wantRight) RS=build_pane(el("rp"),"right",p.id,rm);
   else if(!SOLO) el("rp").innerHTML="<div class='empty'><b>Nothing in the output for this document.</b><br>"+
         "Either the run withheld it, or it was never processed.</div>";
-  // Recover the substitutions from the pair itself when the run shipped no
-  // mappings database. With one, its values are authoritative and exact.
-  const dyn = HASMAP ? null : diffPii(LS,RS);
-  mark(LS,"left",dyn); if(RS) mark(RS,"right",dyn);
+  mark(LS,"left"); if(RS) mark(RS,"right");
   if(lm.kind==="records"&&rm.kind==="records") alignRecords(LS,RS);
   linkScroll(LS,RS);
   prefetch();
@@ -2104,7 +2354,7 @@ addEventListener("keydown",e=>{
   else if(kl==="i"){e.preventDefault();toggleInfo();}
   else if(kl==="m"){e.preventDefault();maps();}
   else if(kl==="h"){e.preventDefault();HILITE=!HILITE;
-    el("hil").textContent=HILITE?"pii on":"pii off"; render();}
+    hilLabel(); render();}
   else if(kl==="y"){e.preventDefault();SYNC=!SYNC;el("syn").textContent=SYNC?"sync on":"sync off";}
   else if(kl==="a"){e.preventDefault();onlyNew=!onlyNew;
     el("mode").textContent=onlyNew?"unreviewed only":"all files";build();list();render();}
@@ -2151,7 +2401,7 @@ fetch("/api/boot").then(r=>r.json()).then(b=>{
   (b.recent||[]).slice(0,3).forEach(v=>{const d=document.createElement("div");
     d.className="recent";d.textContent="↩ "+v;
     d.onclick=()=>{el("root").value=v;syncProf();inspect();};box.appendChild(d);});
-  if(b.ready){ loadPii().then(()=>{start(b);}); } else el("root").focus();
+  if(b.ready){ start(b); } else el("root").focus();
 });
 </script></body></html>"""
 
@@ -2324,7 +2574,7 @@ def _kept_names(left: str, right: str | None, ign: set) -> list[str]:
 
 
 def open_review(root=None, left=None, right=None, profile=None,
-                source=None, output=None, ignore=None, label=None,
+                source=None, output=None, ignore=None, label=None, drop=None,
                 per_app: int = PER_APP, mappings: str | None = None,
                 seed: str | None = None, solo: bool = False,
                 solo_label: str = "Transformed") -> dict:
@@ -2332,7 +2582,7 @@ def open_review(root=None, left=None, right=None, profile=None,
     ign = {s.strip().lower() for s in (ignore or pairing.DEFAULT_IGNORE) if s.strip()}
     ign |= {s.lower() for s in (source, output) if s}
 
-    idx = pairing.build(ls, rs, ignore=ignore, **filt)
+    idx = pairing.build(ls, rs, ignore=ignore, drop_globs=drop, **filt)
 
     def _bytes(store, key):
         try:
@@ -2453,6 +2703,10 @@ def open_review(root=None, left=None, right=None, profile=None,
         scope_note = (f"{total:,} document(s) under {named}{more} have no output at "
                       f"all, so this run did not cover them and they are not "
                       f"listed. Point at that location directly to review it.")
+        # Console only. As a page banner this sat above every screen for the
+        # whole session restating a fact the file list already shows -- the
+        # uncovered units are not listed -- so it read as an unfixable warning
+        # about a healthy run. Logged once at startup instead.
         print(f"  {scope_note}", flush=True)
 
     # Safety net. If almost nothing paired, the split is almost certainly
@@ -2490,7 +2744,6 @@ def open_review(root=None, left=None, right=None, profile=None,
                "solo": bool(solo), "solo_label": solo_label,
                "total": len(every),
                "left": S["left"], "right": S["right"], "hint": hint,
-               "scope_note": scope_note,
                "thinned": thinned, "partial": partial, "per_app": per_app,
                "sample": salt[:6],
                "has_map": bool(map_spec),
@@ -2582,42 +2835,48 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json({"rows": hit[:SEARCH_MAX], "matched": len(hit),
                                "total": len(rows), "cap": SEARCH_MAX})
         if path == "/api/pii":
-            # Just the strings, for highlighting the panes. The mappings panel
-            # wants rows, types and paging; this wants two flat lists and
-            # wants them small, because the client compiles them into a regex.
+            # Scoped to ONE document -- see pii_index for why a run-wide list
+            # cannot work. Without a sid there is nothing to intersect against,
+            # so there is nothing to mark yet.
             src = S.get("map_spec")
-            if not src:
-                return self._json({"orig": [], "repl": []})
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            sid = (q.get("sid") or [""])[0].strip()
+            blank = {"orig": [], "repl": [], "leak": []}
+            if not sid:
+                return self._json(blank)
             try:
-                out = read_mappings(src, S.get("profile"),
-                                    S.get("map_store"), S.get("map_inner"))
-            except Exception as exc:  # noqa: BLE001
-                return self._json({"orig": [], "repl": [], "error": str(exc)[:200]})
-            # Three lists, because a mapping row means one of two very
-            # different things. A row WITH a replacement was substituted: mark
-            # the original in the source and the replacement in the output. A
-            # row WITHOUT one was DETECTED AND LEFT ALONE -- the value is still
-            # in the deliverable verbatim. Marking those the same amber said
-            # "handled" about the exact rows that were not, which is the worst
-            # thing this panel could get wrong.
-            o, r, leak = set(), set(), set()
-            for row in out["rows"]:
-                if row.get("deleted"):
-                    continue
-                a = row.get("original") or ""
-                b = row.get("replacement") or ""
-                # Two characters matches half the corpus.
-                if len(a) < 3:
-                    continue
-                if b:
-                    o.add(a)
-                    if len(b) >= 3:
-                        r.add(b)
-                else:
-                    leak.add(a)
-            cap = 6000
-            k = lambda v: sorted(v, key=len, reverse=True)[:cap]
-            return self._json({"orig": k(o), "repl": k(r), "leak": k(leak)})
+                row = S["rows"][int(sid)]
+                # Per user, not per run -- see resolve_map.
+                user = (row.get("label") or "").split("/")[0]
+                lt = rt = ""
+                if row["left"]:
+                    lt = _doc_text("left", sid, row["left"], S["left_store"])
+                if row["right"]:
+                    rt = _doc_text("right", sid, row["right"], S["right_store"])
+                # No mapping table for this user -- derive the marks from the
+                # two panes instead. Highlighting is the whole point of the
+                # tool, so it degrades rather than switching off.
+                spec = resolve_map(src, S.get("profile"), user) if src else None
+                if not spec:
+                    warm_derived(S)
+                    return self._json(dict(derive_pii(sid, lt, rt), user=user,
+                                           no_mappings=bool(src)))
+                inner = S.get("map_inner") if spec == src else None
+                store = S.get("map_store") if spec == src else None
+                idx = pii_index(spec, S.get("profile"), store, inner)
+            except Exception as exc:  # noqa: BLE001 -- surfaced on the card
+                return self._json(dict(blank, error=f"{type(exc).__name__}: {exc}"[:200]))
+            # A solo review pairs a tree with itself and can be either half of
+            # a run, so each side falls back to the other and mark() lets the
+            # colours say which it was looking at.
+            return self._json({
+                "orig": pii_for(idx, "orig", lt or rt),
+                "repl": pii_for(idx, "repl", rt or lt),
+                "leak": pii_for(idx, "leak", lt + "\n" + rt),
+                "total": idx["count"],
+                "user": user,
+                "db": spec,
+            })
         if path == "/api/mappings":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             try:
@@ -2866,6 +3125,10 @@ def _fan_out(jobs, a) -> int:
         for flag in ("profile", "source", "output", "mappings", "seed"):
             if getattr(a, flag, None):
                 cmd += [f"--{flag}", getattr(a, flag)]
+        # Repeatable, so it cannot ride the loop above -- forwarding only the
+        # first glob would silently half-apply the filter in a fan-out.
+        for g in (getattr(a, "drop", None) or []):
+            cmd += ["--drop", g]
         cmd += ["--label", job["label"]]
         # Each child's chatter goes to its own file rather than the shared
         # terminal. Three reviews indexing at once interleaved into an
@@ -2950,9 +3213,15 @@ def main():
     ap.add_argument("--source", help="folder name of the source half inside root")
     ap.add_argument("--output", help="folder name of the output half inside root")
     ap.add_argument("--profile", help="AWS profile for S3 locations")
+    ap.add_argument("--drop", action="append", metavar="GLOB",
+                    help="drop paths matching GLOB from BOTH halves before "
+                         "pairing. For artefacts a run never emits, so they "
+                         "stop reading as missing output. Repeatable.")
     ap.add_argument("--label", help="what to call this batch in the tab title")
-    ap.add_argument("--mappings", help="pii_mappings.db to inspect, if the run "
-                                       "did not ship one next to its output")
+    ap.add_argument("--mappings", help="pii_mappings.db to inspect -- or the "
+                                   "FOLDER/prefix holding one per user, for a "
+                                   "multi-user run -- if the run did not ship "
+                                   "one next to its output")
     ap.add_argument("--seed", help="sample to use instead of this machine's own. "
                                    "Pass a colleague's to review exactly what "
                                    "they are reviewing.")
@@ -2996,7 +3265,7 @@ def main():
     if a.root or (a.left and a.right):
         open_review(root=a.root, left=a.left, right=a.right, profile=a.profile,
                     label=a.label, mappings=a.mappings, seed=a.seed,
-                    source=a.source, output=a.output,
+                    source=a.source, output=a.output, drop=a.drop,
                     solo=bool(a.single), solo_label=a.single_label)
 
     url = f"http://127.0.0.1:{a.port}/"

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter, defaultdict
+import fnmatch
 from pathlib import PurePosixPath
 
 from stores import is_doc
@@ -377,7 +378,7 @@ def apply_rename(d: tuple, rename: dict) -> tuple:
 
 
 def build(left_store, right_store, ignore=None, left_only=None, right_only=None,
-          left_exclude=None, right_exclude=None):
+          left_exclude=None, right_exclude=None, drop_globs=None):
     """Index one review.
 
     ``*_only`` keeps only paths carrying that folder name; ``*_exclude`` drops
@@ -408,7 +409,16 @@ def build(left_store, right_store, ignore=None, left_only=None, right_only=None,
         # Document filtering runs AFTER the selector, on the part below it.
         # An in-place run's output lives under "_pii/output", and testing the
         # whole path would reject the very side that was just selected.
-        return [p for p in out if is_doc(after(p, only))]
+        out = [p for p in out if is_doc(after(p, only))]
+        # Paths a run is KNOWN never to emit -- pipeline artefacts that live
+        # only on the source side. Without this they pair with nothing and
+        # every user reports "N missing" for files that were excluded on
+        # purpose, which buries the real gaps.
+        if drop_globs:
+            out = [p for p in out
+                   if not any(fnmatch.fnmatch(p, g) or
+                              fnmatch.fnmatch(p.rsplit("/", 1)[-1], g) for g in drop_globs)]
+        return out
 
     L = keep(left_store.paths, left_only, left_exclude)
     R = keep(right_store.paths, right_only, right_exclude)
