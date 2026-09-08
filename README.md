@@ -168,3 +168,226 @@ Pull out everything you commented on:
 python3 -c "import json;m=json.load(open('marks.json'));\
 [print(k,'|',c) for s,v in m.items() for k,d in v.items() for c in d.get('comments',[])]"
 ```
+
+## Setup from a fresh checkout
+
+These steps are suitable for a new machine. The application itself uses Python's
+standard library. AWS CLI is only needed when opening S3 locations.
+
+### 1. Clone the repository
+
+macOS/Linux:
+
+```bash
+git clone https://github.com/piyushhhh100x/pii-review.git
+cd pii-review
+```
+
+Windows PowerShell:
+
+```powershell
+git clone https://github.com/piyushhhh100x/pii-review.git
+Set-Location .\pii-review
+```
+
+### 2. Check Python
+
+Python 3.9 or newer is required.
+
+```bash
+python3 --version
+```
+
+On Windows, use either `py --version` or `python --version`. If Python is not
+installed, install it from <https://www.python.org/downloads/> and enable the
+option to add Python to PATH.
+
+### 3. Start the app
+
+macOS/Linux:
+
+```bash
+python3 review.py
+```
+
+Windows PowerShell:
+
+```powershell
+py .\review.py
+```
+
+The app prints a local URL such as `http://127.0.0.1:8765/` and normally opens
+it in the default browser. Open that URL manually if the browser does not open.
+Use `Ctrl-C` in the terminal to stop the server.
+
+### 4. Optional PDF rendering
+
+PDFs work with the browser's built-in viewer without extra packages. For
+scroll-synchronised PDF page images and extracted PDF text, install PyMuPDF in
+the Python environment used to run the app:
+
+```bash
+python3 -m pip install PyMuPDF
+```
+
+Windows PowerShell:
+
+```powershell
+py -m pip install PyMuPDF
+```
+
+Text, JSON, JSONL, CSV, email, XML, DOCX, XLSX, and image files do not require
+PyMuPDF.
+
+## S3 setup
+
+Install the AWS CLI only when you need S3:
+
+- AWS CLI installation guide: <https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html>
+- Verify it with `aws --version`.
+
+Configure a profile using SSO (recommended):
+
+```bash
+aws configure sso --profile example-profile
+aws sso login --profile example-profile
+aws sts get-caller-identity --profile example-profile
+```
+
+Then open a bucket:
+
+```bash
+./review s3://example-bucket/example-prefix/ --profile example-profile
+```
+
+On Windows PowerShell:
+
+```powershell
+py .\review.py "s3://example-bucket/example-prefix/" --profile example-profile
+```
+
+For access keys supplied by an administrator, store them in the AWS credentials
+file, never in this README, a command line, source code, or a commit:
+
+```ini
+[example-profile]
+aws_access_key_id = AKIAEXAMPLE000000000
+aws_secret_access_key = example-secret-key-do-not-use
+region = ap-south-1
+```
+
+The credentials file is normally `~/.aws/credentials` on macOS/Linux and
+`%USERPROFILE%\.aws\credentials` on Windows. Confirm the account before opening
+data:
+
+```bash
+aws sts get-caller-identity --profile example-profile
+aws s3 ls s3://example-bucket/example-prefix/ --profile example-profile
+```
+
+The profile needs `s3:ListBucket` and `s3:GetObject`. Listing is required to
+build the review index. If either command returns `AccessDenied`, ask the bucket
+owner for access; do not work around the policy or copy credentials into the
+repository.
+
+Console URLs are accepted directly. Quote them because `&` has special meaning
+in shells:
+
+```bash
+./review 'https://s3.console.aws.amazon.com/s3/buckets/example-bucket?region=ap-south-1&prefix=example-prefix/' --profile example-profile
+```
+
+### S3 source and redacted pair
+
+When the source and output are separate prefixes, use `--pair`:
+
+```bash
+./review --pair \
+  s3://example-bucket/source-prefix/ \
+  s3://example-bucket/redacted-prefix/ \
+  --profile example-profile
+```
+
+Windows PowerShell uses the same command on one line, or PowerShell's backtick
+for continuation:
+
+```powershell
+py .\review.py --pair `
+  "s3://example-bucket/source-prefix/" `
+  "s3://example-bucket/redacted-prefix/" `
+  --profile example-profile
+```
+
+Use a different port when another reviewer tab is already running:
+
+```bash
+./review --pair SRC OUT --profile example-profile --port 8766
+```
+
+## PII highlighting
+
+If a run includes `pii_mappings.db`, the app highlights original values in the
+source pane, replacements in the output pane, and detected-but-unreplaced values
+as leaks. The mappings panel is available from the **PII-mappings** button.
+
+Some verification samples do not include a mappings database. In that case the
+app still highlights common PII patterns such as email addresses, formatted
+phone numbers, and SSNs as a visual QA aid. This fallback is not a replacement
+for the pipeline's authoritative mappings or a security scanner.
+
+If documents load but no values are highlighted:
+
+1. Confirm the app is running the latest checkout.
+2. Refresh the browser tab.
+3. Open the **PII-mappings** panel and check whether a mappings database was
+   found.
+4. Remember that a sample without mappings uses the common-pattern fallback,
+   so custom PII formats may require manual review.
+
+## Troubleshooting
+
+**The browser page is blank or says it cannot ask the server about a document.**
+
+Restart the app from the repository directory and open the URL printed by the
+new process. Check that the terminal stays running and that the chosen AWS
+profile can read the object directly:
+
+```bash
+aws s3 cp s3://example-bucket/example-prefix/example.json - \
+  --profile example-profile
+```
+
+**The app lists S3 folders but cannot read files.**
+
+The profile may have `s3:ListBucket` without `s3:GetObject`, or the object may
+be encrypted with a KMS key that the role cannot use. Ask the bucket owner for
+both permissions.
+
+**Windows reports that `aws` cannot be found.**
+
+Install the AWS CLI and ensure its installation directory is on PATH. Then
+restart PowerShell and verify with `aws --version`. The Windows launcher in
+this repository supports the standard `aws.cmd` executable.
+
+**A PDF is downloadable but not rendered as images.**
+
+Install PyMuPDF in the same Python environment used to launch `review.py`, or
+use the browser PDF fallback. Other supported document formats do not depend on
+PyMuPDF.
+
+**The wrong files are shown.**
+
+Use explicit `--pair SOURCE OUTPUT` paths. For a nested `_pii/output/` URL, the
+app attempts to locate the corresponding source run automatically; explicit
+paths are preferred when a run has multiple possible source prefixes.
+
+## Security notes
+
+- Never paste real access keys or secret keys into source files, README files,
+  issue trackers, chat, shell history, or commits.
+- Rotate any credential that was accidentally exposed.
+- Prefer short-lived SSO credentials or a narrowly scoped read-only role.
+- Review only the minimum S3 prefix required for the QA task.
+- `marks.json`, `map_notes.json`, `.renderer`, and local AWS configuration may
+  contain local session state; do not commit credentials or sensitive review
+  data.

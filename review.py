@@ -1567,10 +1567,19 @@ function rxOf(list){
   // "OPTORY LABS" and an exact match silently never fires.
   try{ return new RegExp("("+body+")","gi"); }catch(e){ return null; }
 }
+function fallbackRx(){
+  // Verification samples may not ship pii_mappings.db. Keep common PII
+  // visible in that case rather than silently disabling highlighting.
+  return /([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|(?:\+\d{1,3}[ .-])?(?:\(\d{3}\)|\d{3})[ .-]\d{3}[ .-]\d{4}|\b\d{3}-\d{2}-\d{4}\b)/gi;
+}
 async function loadPii(){
   try{
     const d=await (await fetch("/api/pii")).json();
-    PIIRX.orig=rxOf(d.orig); PIIRX.repl=rxOf(d.repl); PIIRX.leak=rxOf(d.leak);
+    const hasMappings=(d.orig&&d.orig.length)||(d.repl&&d.repl.length)||(d.leak&&d.leak.length);
+    const fallback=hasMappings?null:fallbackRx();
+    PIIRX.orig=rxOf(d.orig)||fallback;
+    PIIRX.repl=rxOf(d.repl)||fallback;
+    PIIRX.leak=rxOf(d.leak);
   }catch(e){}
 }
 function mark(root,side){
@@ -1643,7 +1652,9 @@ async function panes(p){
   const warm=(DOCC.get(dkey("left",p.id))||{}).ready===true;
   if(!warm){ shimmer(el("lp")); if(wantRight) shimmer(el("rp")); }
   let lm={kind:"other",why:"could not ask the server about this document"},rm={kind:"none"};
-  if(CAN){ try{
+  // Text and structured documents do not depend on the optional PDF renderer.
+  // Always fetch the document metadata; PDF rendering is handled by build_pane.
+  try{
     // Both sides at once. Sequential awaits made every document cost two round
     // trips end to end.
     const [lr,rr]=await Promise.all([
@@ -1651,7 +1662,7 @@ async function panes(p){
       wantRight?docFetch("right",p.id):Promise.resolve({kind:"none"}),
     ]);
     lm=lr; rm=rr;
-  }catch(e){} }
+  }catch(e){} 
   if(seq!==SEQ) return;                 // a slower answer for a document already left behind
   LS=build_pane(el("lp"),"left",p.id,lm);
   if(wantRight) RS=build_pane(el("rp"),"right",p.id,rm);
