@@ -852,6 +852,123 @@ class EndToEnd(unittest.TestCase):
         self.assertTrue(m["missing"])
 
 
+class Highlighting(unittest.TestCase):
+    """The vocabulary the panes are marked from.
+
+    The bug this covers: the vocabulary was run-wide and capped at the LONGEST
+    values, so a mail export's tracking URLs filled the cap and not one name,
+    email or phone was ever sent to the client. Highlighting looked broken
+    because the only values it was looking for were half-kilobyte links.
+    """
+
+    def db(self, rows):
+        import shutil as _sh
+        import sqlite3
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(_sh.rmtree, d, ignore_errors=True)
+        path = d / "pii_mappings.db"
+        con = sqlite3.connect(path)
+        con.execute("create table mappings (id integer primary key, original text, "
+                    "attribute_type text, replacement text, deleted integer)")
+        con.executemany(
+            "insert into mappings (original, attribute_type, replacement, deleted) "
+            "values (?,?,?,?)", rows)
+        con.commit()
+        con.close()
+        review._PII_IDX.clear()
+        review._MAP_CACHE.clear()
+        return str(path)
+
+    def noise(self, n):
+        """n tracking URLs, each longer than any real name."""
+        return [(f"https://clicks.example.com/f/a/{'z' * 400}{i}", "url",
+                 f"https://links.example.net/c/{'q' * 400}{i}", 0)
+                for i in range(n)]
+
+    def test_a_short_name_survives_a_flood_of_long_urls(self):
+        spec = self.db(self.noise(review.PII_MAX + 2000)
+                       + [("Tatum Wilde", "full_name", "Jacob Clark", 0)])
+        idx = review.pii_index(spec)
+        left = "name,email\nTatum Wilde,tatum-wilde@inbox.example.com\n"
+        right = "name,email\nJacob Clark,jacobclark@jadarvex.com\n"
+        self.assertIn("Tatum Wilde", review.pii_for(idx, "orig", left))
+        self.assertIn("Jacob Clark", review.pii_for(idx, "repl", right))
+
+    def test_the_vocabulary_is_scoped_to_the_document(self):
+        spec = self.db([("Tatum Wilde", "full_name", "Jacob Clark", 0),
+                        ("Sunita Rao", "full_name", "Marta Diaz", 0)])
+        idx = review.pii_index(spec)
+        got = review.pii_for(idx, "orig", "who,when\nTatum Wilde,2025-12-11\n")
+        self.assertEqual(got, ["Tatum Wilde"])
+
+    def test_casing_is_ignored_because_the_rewriter_keeps_the_cell_s_own(self):
+        spec = self.db([("Optory Labs", "company_name", "Vantage Foods", 0)])
+        idx = review.pii_index(spec)
+        self.assertIn("Optory Labs",
+                      review.pii_for(idx, "orig", "vendor\nOPTORY LABS\n"))
+
+    def test_a_detected_value_with_no_replacement_is_a_leak_not_a_substitution(self):
+        spec = self.db([("9845012345", "phone_local", None, 0)])
+        idx = review.pii_index(spec)
+        doc = "phone\n9845012345\n"
+        self.assertEqual(review.pii_for(idx, "leak", doc), ["9845012345"])
+        self.assertEqual(review.pii_for(idx, "orig", doc), [])
+
+    def test_a_deleted_mapping_is_not_marked(self):
+        spec = self.db([("Tatum Wilde", "full_name", "Jacob Clark", 1)])
+        idx = review.pii_index(spec)
+        self.assertEqual(review.pii_for(idx, "orig", "who\nTatum Wilde\n"), [])
+
+    def test_a_db_named_directly_is_used_as_given(self):
+        spec = self.db([("Tatum Wilde", "full_name", "Jacob Clark", 0)])
+        self.assertEqual(review.resolve_map(spec, None, "anyone"), spec)
+
+    def test_a_folder_of_databases_is_resolved_per_user(self):
+        """A multi-user run has one mapping table PER USER, and two users'
+        tables are not interchangeable. Pointing at a single database gives no
+        marks on every user it does not cover, which reads as broken
+        highlighting."""
+        import shutil as _sh
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(_sh.rmtree, d, ignore_errors=True)
+        flat = self.db([("Tatum Wilde", "full_name", "Jacob Clark", 0)])
+        nested = self.db([("Sunita Rao", "full_name", "Marta Diaz", 0)])
+        _sh.copy(flat, d / "alice_gmail.com.db")
+        (d / "bob_gmail.com").mkdir()
+        _sh.copy(nested, d / "bob_gmail.com" / "pii_mappings.db")
+        review._MAP_PICK.clear()
+
+        a = review.resolve_map(str(d), None, "alice_gmail.com")
+        b = review.resolve_map(str(d), None, "bob_gmail.com")
+        self.assertEqual(Path(a).name, "alice_gmail.com.db")
+        self.assertEqual(Path(b).parent.name, "bob_gmail.com")
+        self.assertIsNone(review.resolve_map(str(d), None, "carol_gmail.com"))
+
+        review._PII_IDX.clear()
+        self.assertEqual(
+            review.pii_for(review.pii_index(a), "orig", "who\nTatum Wilde\n"),
+            ["Tatum Wilde"])
+        review._PII_IDX.clear()
+        self.assertEqual(
+            review.pii_for(review.pii_index(b), "orig", "who\nSunita Rao\n"),
+            ["Sunita Rao"])
+
+    def test_only_a_few_indexes_are_held_at_once(self):
+        specs = [self.db([(f"Name Number{n}", "full_name", f"Alias{n}", 0)])
+                 for n in range(review.PII_IDX_KEEP + 3)]
+        review._PII_IDX.clear()
+        for sp in specs:
+            review.pii_index(sp)
+        self.assertLessEqual(len(review._PII_IDX), review.PII_IDX_KEEP)
+
+    def test_longest_first_so_a_surname_is_not_eaten_by_the_first_name(self):
+        spec = self.db([("Tatum", "full_name", "Jacob", 0),
+                        ("Tatum Wilde", "full_name", "Jacob Clark", 0)])
+        idx = review.pii_index(spec)
+        self.assertEqual(review.pii_for(idx, "orig", "who\nTatum Wilde\n"),
+                         ["Tatum Wilde", "Tatum"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
