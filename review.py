@@ -519,6 +519,13 @@ def view(key: str, data: bytes) -> dict:
     """
     import html as _html
     ext = Path(key).suffix.lower()
+    # A zero-byte object is not a rendering failure. Runs ship empty
+    # placeholders -- 103 of the 1,128 objects in one github export -- and an
+    # empty pane is indistinguishable from a broken viewer, so this reads as
+    # "the highlighting is gone" when there is simply nothing there. Say so,
+    # and do not offer a download of nothing.
+    if not data:
+        return {"kind": "empty"}
     if ext == ".pdf":
         return {"kind": "pdf"}
     try:
@@ -1448,6 +1455,12 @@ function build_pane(box,side,id,meta){
     const img=new Image(); img.src="/doc/"+side+"/"+id; img.style.width="100%";
     sc.appendChild(img); box.appendChild(sc); return sc;
   }
+  if(meta.kind==="empty"){
+    box.innerHTML="<div class='empty'><b>This object is empty.</b><br>"+
+      "<span class=why>Zero bytes in the store &mdash; nothing to review, and "+
+      "nothing to highlight. Not a viewer fault.</span></div>";
+    return null;
+  }
   if(meta.kind==="other"){
     // Never an iframe. Chrome does not "fail to render" a .doc or a broken
     // xlsx -- it saves it, silently, once per pane per refresh, and leaves
@@ -1582,13 +1595,77 @@ async function loadPii(){
     PIIRX.leak=rxOf(d.leak);
   }catch(e){}
 }
-function mark(root,side){
+/* No pii_mappings.db shipped with the run. The substitutions are still
+   recoverable, because the two panes are the same document before and after
+   the rewriter ran: a value that differs between them IS a substitution, the
+   left one the original and the right one its replacement. This is what
+   catches the PII no pattern can -- an org, a login, a repo, a display name --
+   which on a github export is most of it. Diffed per token rather than per
+   value, so "DiveHQ" lights up inside the URL it sits in rather than the whole
+   URL going amber. */
+function piiTokens(s){ return s.split(/([^A-Za-z0-9_.+@-]+)/); }
+function textNodes(root){
+  const w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,null);
+  const out=[]; let n; while((n=w.nextNode())) out.push(n.nodeValue);
+  return out;
+}
+function diffTokens(a,b,orig,repl){
+  const A=piiTokens(a), Bb=piiTokens(b), m=A.length, n=Bb.length;
+  // A rewritten blob can be thousands of tokens; the table is O(m*n) and the
+  // pane must not stall for one pathological value.
+  if(m*n>40000) return;
+  const L=[]; for(let i=0;i<=m;i++) L.push(new Int32Array(n+1));
+  for(let i=m-1;i>=0;i--) for(let j=n-1;j>=0;j--)
+    L[i][j] = A[i]===Bb[j] ? L[i+1][j+1]+1 : Math.max(L[i+1][j], L[i][j+1]);
+  let i=0,j=0,ra=[],rb=[];
+  const flush=()=>{
+    const x=ra.join("").trim(), y=rb.join("").trim();
+    if(x.length>2) orig.push(x);
+    if(y.length>2) repl.push(y);
+    ra=[]; rb=[];
+  };
+  while(i<m&&j<n){
+    if(A[i]===Bb[j]){ flush(); i++; j++; }
+    else if(L[i+1][j]>=L[i][j+1]) ra.push(A[i++]);
+    else rb.push(Bb[j++]);
+  }
+  while(i<m) ra.push(A[i++]);
+  while(j<n) rb.push(Bb[j++]);
+  flush();
+}
+function diffPii(ls,rs){
+  if(!ls||!rs) return null;
+  const a=textNodes(ls), b=textNodes(rs);
+  // Positional compare only when the two sides rendered the same shape. A
+  // record the output dropped or added shifts everything after it, and a
+  // shifted compare would call every remaining value a substitution.
+  if(!a.length||a.length!==b.length) return null;
+  const orig=[], repl=[];
+  for(let k=0;k<a.length;k++) if(a[k]!==b[k]) diffTokens(a[k],b[k],orig,repl);
+  if(!orig.length&&!repl.length) return null;
+  // A rewritten commit hash is churn, not PII -- forty hex characters swapped
+  // for forty others, on every commit in the file -- and marking them buries
+  // the values that matter. Nothing else is filtered: a scrubbed field name
+  // ("received_events" -> "received_orboraion") is over-redaction, which is a
+  // finding in its own right and belongs on screen.
+  const churn=v=>/^[0-9a-f]{7,}$/i.test(v);
+  const uniq=l=>[...new Set(l)].filter(v=>!churn(v))
+                               .sort((x,y)=>y.length-x.length);
+  const O=uniq(orig), R=uniq(repl);
+  if(!O.length&&!R.length) return null;
+  return {orig:rxOf(O), repl:rxOf(R), leak:null};
+}
+function mark(root,side,dyn){
   if(!root||!HILITE) return;
+  // The diffed pairs beat the pattern fallback when both are available: they
+  // are this document's actual substitutions rather than a guess at what PII
+  // looks like.
+  const P = dyn || PIIRX;
   // Leaks are marked on BOTH panes: the value was detected and NOT replaced,
   // so it is sitting in the output unchanged, and seeing it red on the right
   // is the whole point.
   paint(root, PIIRX.leak, "leak");
-  paint(root, side==="left" ? PIIRX.orig : PIIRX.repl, side);
+  paint(root, side==="left" ? P.orig : P.repl, side);
 }
 function paint(root,rx,cls){
   if(!root||!rx) return;
@@ -1668,7 +1745,10 @@ async function panes(p){
   if(wantRight) RS=build_pane(el("rp"),"right",p.id,rm);
   else if(!SOLO) el("rp").innerHTML="<div class='empty'><b>Nothing in the output for this document.</b><br>"+
         "Either the run withheld it, or it was never processed.</div>";
-  mark(LS,"left"); if(RS) mark(RS,"right");
+  // Recover the substitutions from the pair itself when the run shipped no
+  // mappings database. With one, its values are authoritative and exact.
+  const dyn = HASMAP ? null : diffPii(LS,RS);
+  mark(LS,"left",dyn); if(RS) mark(RS,"right",dyn);
   if(lm.kind==="records"&&rm.kind==="records") alignRecords(LS,RS);
   linkScroll(LS,RS);
   prefetch();

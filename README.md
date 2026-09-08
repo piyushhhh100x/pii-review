@@ -3,6 +3,198 @@
 Source on the left, what the pipeline produced on the right. Eyeball a hundred
 documents in a sitting without touching the mouse.
 
+## Quick start: access key, secret key, bucket
+
+Three values and one command, on a machine that has never seen this repo. No
+AWS CLI, no `aws configure`, no profile file — the app reaches S3 through
+boto3, which reads the standard `AWS_*` environment variables.
+
+**macOS / Linux**
+
+```bash
+# 1. Code, and a Python that can reach S3.
+git clone https://github.com/pritammishra-glitch/pii-review.git
+cd pii-review
+python3 -m venv .venv && . .venv/bin/activate
+python3 -m pip install --quiet boto3
+
+# 2. The only lines you edit.
+export AWS_ACCESS_KEY_ID='AKIAEXAMPLE000000000'
+export AWS_SECRET_ACCESS_KEY='example-secret-key-do-not-use'
+export AWS_DEFAULT_REGION='ap-south-1'
+BUCKET='example-bucket'
+PREFIX='assignments/d/gsuite/qa-0000000/'
+
+# 3. Go.
+python3 review.py "s3://$BUCKET/$PREFIX"
+```
+
+**Windows PowerShell**
+
+```powershell
+git clone https://github.com/pritammishra-glitch/pii-review.git
+Set-Location .\pii-review
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --quiet boto3
+
+$env:AWS_ACCESS_KEY_ID     = 'AKIAEXAMPLE000000000'
+$env:AWS_SECRET_ACCESS_KEY = 'example-secret-key-do-not-use'
+$env:AWS_DEFAULT_REGION    = 'ap-south-1'
+$BUCKET = 'example-bucket'
+$PREFIX = 'assignments/d/gsuite/qa-0000000/'
+
+python review.py "s3://$BUCKET/$PREFIX"
+```
+
+The app prints `http://127.0.0.1:8765/` and opens it. `Ctrl-C` stops it. Give
+it a moment before assuming it hung — it lists the whole prefix to build the
+index first, and prints nothing while it does.
+
+Set the region to the bucket's own region. A wrong region fails to list even
+with valid keys, and a bare bucket name carries no region of its own — only a
+console URL does.
+
+### Check access first
+
+If listing is denied, the app exits with a traceback rather than opening. One
+command tells you before you start, and needs no AWS CLI:
+
+```bash
+python3 -c "import boto3;print(boto3.client('s3').list_objects_v2(Bucket='example-bucket',MaxKeys=1).get('KeyCount'))"
+```
+
+A number means you are in. `AccessDenied` on **`s3:ListBucket`** is fatal and
+not something this tool can work around — listing is what builds the index, so
+`s3:GetObject` alone is not enough. Ask the bucket owner for both, on the
+bucket *and* its contents:
+
+```
+arn:aws:s3:::example-bucket
+arn:aws:s3:::example-bucket/*
+```
+
+`aws sts get-caller-identity` names the user you are actually authenticating
+as, which is usually the surprise.
+
+### Variations on that one command
+
+| What you have | What to run |
+| --- | --- |
+| Only a bucket name | `python3 review.py "s3://$BUCKET/"` |
+| A console URL from the address bar | `python3 review.py 'https://s3.console...&prefix=p/'` — quote it, or `&` backgrounds your shell |
+| Source and output as separate prefixes | `python3 review.py --pair "s3://$BUCKET/export/" "s3://$BUCKET/_pii/output/export/"` |
+| A second run open already | add `--port 8766` — one port per run |
+| Keys you would rather not retype | put them in a profile (see **S3 setup**) and pass `--profile NAME` |
+
+`--profile` and the `AWS_*` variables are alternatives; you need one, not both.
+Passing `--profile` makes the app use that profile and ignore the variables.
+
+### If you would rather not export keys
+
+Environment variables live only in the current shell, which is why they suit a
+one-off. For anything you repeat, use a named profile instead — it keeps the
+key material out of your shell history entirely. See **S3 setup** below.
+
+## For coding agents
+
+A runbook for Claude Code, Codex and the like: set the app up and confirm it is
+serving, in one pass, with no human at the keyboard. Read this whole section
+before running anything — three of these steps fail in ways that look like
+success.
+
+### The contract
+
+| | |
+| --- | --- |
+| **Inputs you need** | access key, secret key, bucket region, and a bucket (plus prefix, if any) |
+| **Never** | write key material into the repo, a command that gets logged, or `~/.aws/credentials` without being asked. Pass it in the environment |
+| **The process** | a long-running HTTP server. Start it in the background and poll; it does not return |
+| **Readiness** | it prints `  http://127.0.0.1:PORT/` once indexing is done, then binds. Confirm with `GET /api/boot` returning JSON whose `pairs` array is non-empty |
+| **Never pipe its output** | `python3 review.py ... \| tail` reports **`tail`'s** exit status, so a crash looks like success, and the pipe buffers the log so a healthy run looks silent. Redirect to a file instead |
+| **Startup is slow and quiet** | nothing is printed until the whole prefix has been listed. On a large bucket that is minutes. An empty log means "still indexing", not "broken" |
+
+### One-shot setup
+
+Run each block, in order, and stop at the first that fails.
+
+```bash
+# 1. Environment. Substitute the four values; export nothing else.
+export AWS_ACCESS_KEY_ID='...'
+export AWS_SECRET_ACCESS_KEY='...'
+export AWS_DEFAULT_REGION='ap-south-1'
+TARGET='s3://example-bucket/example-prefix/'
+
+# 2. Dependencies. Isolated, so the host Python is untouched.
+python3 -m venv .venv && . .venv/bin/activate
+python3 -m pip install --quiet boto3
+
+# 3. Preflight. Cheaper than a failed launch, and the error is legible.
+TARGET="$TARGET" python3 - <<'EOF'
+import boto3, os, sys, urllib.parse
+b = urllib.parse.urlparse(os.environ["TARGET"])
+try:
+    r = boto3.client("s3").list_objects_v2(
+        Bucket=b.netloc, Prefix=b.path.lstrip("/"), MaxKeys=1)
+    print("OK keys>=", r.get("KeyCount"))
+except Exception as e:
+    sys.exit("PREFLIGHT FAILED: %s" % e)
+EOF
+
+# 4. Launch, backgrounded, browser suppressed.
+python3 review.py "$TARGET" --port 8765 --no-open > /tmp/review.log 2>&1 &
+
+# 5. Wait for readiness. Poll the API, not the log.
+for i in $(seq 1 90); do
+  if grep -qE 'Traceback|AccessDenied|Error' /tmp/review.log; then
+    tail -20 /tmp/review.log; exit 1
+  fi
+  n=$(curl -sf http://127.0.0.1:8765/api/boot \
+      | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["pairs"]))' 2>/dev/null)
+  if [ -n "$n" ] && [ "$n" -gt 0 ]; then echo "ready: $n pairs"; break; fi
+  sleep 2
+done
+```
+
+On Windows PowerShell, the same steps with `$env:NAME = '...'`,
+`.\.venv\Scripts\Activate.ps1`, `python` for `python3`, and
+`Start-Process`/`Get-NetTCPConnection` in place of `&` and `curl`. Note that
+PowerShell 5.1 has no `&&` — chain with `;` and an `if ($?)` guard.
+
+### Rules that save a wasted run
+
+**Always pass `--no-open`.** Without it the app launches a browser on a machine
+that may have none.
+
+**One port per run, and check it is free yourself.** The server sets
+`allow_reuse_address` (review.py), so a second run on a taken port does not
+reliably fail loudly — on Windows especially it may bind alongside the first
+and serve confusing results. Never assume a listener on 8765 is yours: it may
+be an earlier run of a *different* bucket, indistinguishable until you read
+`left`/`right` from `/api/boot`.
+
+**`/api/boot` is the source of truth for what is loaded.** Its `left` and
+`right` are the two prefixes actually resolved, and `pairs` is how many
+documents were matched up. Confirm these are the ones you were asked for; a
+server answering 200 proves only that it started.
+
+**`s3:ListBucket` denial is terminal.** Retrying, reformatting the URL or
+changing region will not fix it, because listing is what builds the index.
+Report it and stop — the fix is an IAM grant from the bucket owner, and no
+amount of tool cleverness substitutes.
+
+**Do not sweep credential profiles.** Trying each entry in `~/.aws/credentials`
+to see which one opens a bucket is credential probing, and agent sandboxes
+rightly block it. Ask which profile owns the bucket.
+
+**Region is not optional and not guessable.** A bare `s3://bucket/prefix`
+carries no region; only a console URL does. Wrong region fails to list with
+valid keys.
+
+**Prefer a named profile for anything repeated.** Environment variables die
+with the shell, which is what makes them right for a one-shot and wrong for a
+workflow you will run again.
+
 ## Run it
 
 ```
@@ -48,9 +240,10 @@ all of them.
 
 ## S3: getting in
 
-Every S3 location needs `--profile`. Which one depends on who owns the bucket —
-a client bucket is usually a different AWS account from your own, and your SSO
-login does not reach it. Two ways in.
+Every S3 location needs credentials, from either `--profile` or the `AWS_*`
+environment variables (see **Quick start**). Which ones depends on who owns the
+bucket — a client bucket is usually a different AWS account from your own, and
+your SSO login does not reach it. Two ways in.
 
 **SSO, for accounts on your own start URL:**
 
@@ -104,7 +297,8 @@ Listing is what builds the index, so read access alone is not enough. Ask for
 `s3:ListBucket` and `s3:GetObject` on that bucket, or for credentials in the
 account that owns it.
 
-Python 3.9+, standard library only. Nothing is installed. PDFs scroll in step
+Python 3.9+. Local folders and zips need the standard library only; S3 needs
+`boto3` (`pip install boto3`), or failing that the `aws` CLI on PATH. PDFs scroll in step
 if PyMuPDF is importable by any interpreter on the box; without it they fall
 back to the browser's viewer.
 
@@ -172,7 +366,7 @@ python3 -c "import json;m=json.load(open('marks.json'));\
 ## Setup from a fresh checkout
 
 These steps are suitable for a new machine. The application itself uses Python's
-standard library. AWS CLI is only needed when opening S3 locations.
+standard library. S3 additionally needs `boto3`, or the `aws` CLI as a fallback.
 
 ### 1. Clone the repository
 
@@ -241,7 +435,15 @@ PyMuPDF.
 
 ## S3 setup
 
-Install the AWS CLI only when you need S3:
+For S3, install `boto3` — it is what the app prefers, and it avoids the CLI
+entirely:
+
+```bash
+python3 -m pip install boto3
+```
+
+The `aws` CLI is only a fallback for when `boto3` cannot be imported, though it
+is still the handiest way to *diagnose* access (`aws sts get-caller-identity`):
 
 - AWS CLI installation guide: <https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html>
 - Verify it with `aws --version`.
@@ -365,9 +567,10 @@ both permissions.
 
 **Windows reports that `aws` cannot be found.**
 
-Install the AWS CLI and ensure its installation directory is on PATH. Then
-restart PowerShell and verify with `aws --version`. The Windows launcher in
-this repository supports the standard `aws.cmd` executable.
+This only matters if `boto3` is missing. Install `boto3` into the interpreter
+that runs the app (`python -m pip install boto3`) and the CLI is not needed at
+all. If you do want the CLI, put its directory on PATH, restart PowerShell and
+verify with `aws --version`; the app invokes `aws.cmd` on Windows.
 
 **A PDF is downloadable but not rendered as images.**
 
