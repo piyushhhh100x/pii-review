@@ -18,6 +18,8 @@ import json
 import mimetypes
 import os
 import random
+import collections
+import concurrent.futures
 import re
 import socketserver
 import subprocess
@@ -60,11 +62,15 @@ def _write_json(p: Path, data) -> None:
 _SKIP_TOKEN = re.compile(r"^(?:\d{1,2}|[A-Za-z]{1,2})$")
 
 
+#: What counts as one token, everywhere. Shared so a change to the character
+#: class cannot land in one tokeniser and not the other.
+_SPLIT = re.compile(r"[^A-Za-z0-9@._+-]+")
+PII_MIN = 3
+
+
 def _tokens(text: str) -> set[str]:
-    return {
-        t for t in re.split(r"[^A-Za-z0-9@._+-]+", text)
-        if len(t) > 2 and not _SKIP_TOKEN.match(t)
-    }
+    return {t for t in _SPLIT.split(text)
+            if len(t) >= PII_MIN and not _SKIP_TOKEN.match(t)}
 
 
 def _doc_text(side: str, sid: str, key: str, store) -> str:
@@ -683,7 +689,7 @@ def _vocab_split(s: str) -> list[str]:
     Deliberately not ``_tokens``: that one drops anything three characters or
     shorter, and a first name is the anchor a whole mapping is found by.
     """
-    return [t for t in re.split(r"[^A-Za-z0-9@._+-]+", s.lower()) if t]
+    return [t for t in _SPLIT.split(s.lower()) if t]
 
 
 def pii_index(src, profile=None, store=None, inner=None) -> dict:
@@ -820,161 +826,130 @@ def pii_for(idx: dict, name: str, text: str) -> list[str]:
         for v in book.get(t, ()):
             if v not in seen and v.lower() in low:
                 seen.add(v)
-    # Longest first, so a surname is not eaten by a match on the first name.
-    return sorted(seen, key=len, reverse=True)[:PII_MAX]
+    return _rank(seen)
 
 
-#: How many pairs to learn the run's vocabulary from before the reviewer
-#: arrives. Enough that the first document already has signal; small enough
-#: that it finishes while the first page renders.
+#: How many pairs to learn from before the reviewer arrives. Enough that the
+#: first document has signal, small enough to finish while it renders.
 DERIVE_WARM = 60
 
-_DERIVED = {"orig": set(), "repl": set(), "seen": set(), "warm": False}
+#: A token is one of this run's values when the run rewrites it more often
+#: than it leaves it alone. Prose the generator touched once sits far below.
+DERIVE_RATE = 0.25
+
+#: ...and one observation is not evidence. An over-scrubbing run rewrites an
+#: ordinary word somewhere, which alone scores a perfect ratio; requiring a
+#: second occurrence is what separates a value from an accident.
+DERIVE_MIN = 2
+
+#: Learned per user, because a multi-user run rewrites each user on its own
+#: cluster -- see resolve_map. One shared vocabulary would make user A's
+#: originals user B's leak marks.
+_DERIVE: dict[str, dict] = {}
 _DERIVE_LOCK = threading.Lock()
 
-#: Ordinary words are not identifiers. One generic filter rather than a rule
-#: per PII type: an over-scrubbing run rewrites words inside prose too, so
-#: "improvements" and "workspace" enter the learned vocabulary exactly as
-#: "bankonjuno" does, and only this tells them apart.
-WORDS_FILE = "/usr/share/dict/words"
-_WORDS: set[str] | None = None
+
+def _bucket(user: str) -> dict:
+    with _DERIVE_LOCK:
+        return _DERIVE.setdefault(user, {"rewrote": collections.Counter(),
+                                         "kept": collections.Counter(),
+                                         "seen": set(), "warm": False})
 
 
-def _words() -> set[str]:
-    global _WORDS
-    if _WORDS is None:
+def reset_derived() -> None:
+    """A new review is a new run; nothing carries over."""
+    with _DERIVE_LOCK:
+        _DERIVE.clear()
+
+
+def _rank(values) -> list:
+    """Longest first, so a surname is not eaten by a match on the first name,
+    and never more than the client regex can hold."""
+    return sorted({v for v in values if len(v) >= PII_MIN}, key=len, reverse=True)[:PII_MAX]
+
+
+def _learn(user: str, sid: str, left: set, right: set) -> None:
+    """Fold one pair's evidence into what this run does with each token.
+
+    No pattern list and no dictionary. A token gone from the right pane was
+    rewritten here; a token in both was left alone here. Across pairs the
+    ratio separates a value the run redacts from a word it happened to touch
+    once -- in any script, with nothing to install.
+    """
+    st = _bucket(user)
+    with _DERIVE_LOCK:
+        if sid in st["seen"]:
+            return
+        st["seen"].add(sid)
+        st["rewrote"].update(t for t in left - right if len(t) >= PII_MIN)
+        st["kept"].update(t for t in left & right if len(t) >= PII_MIN)
+
+
+def warm_derived(user: str) -> None:
+    """Learn from a bounded sample in the background, once per user.
+
+    A leak is 'this run rewrites that token elsewhere', so the evidence has to
+    come from more than the document on screen. Reads go straight to the store
+    rather than through its 16-entry cache, which the reviewer's own panes
+    depend on.
+    """
+    st = _bucket(user)
+    with _DERIVE_LOCK:
+        if st["warm"]:
+            return
+        st["warm"] = True
+
+    def one(job):
+        i, row = job
+        sid = str(i)
         try:
-            with open(WORDS_FILE, encoding="utf8", errors="replace") as fh:
-                _WORDS = {w.strip().lower() for w in fh if len(w.strip()) > 2}
-        except OSError:
-            _WORDS = set()          # no wordlist on this box; marks get noisier
-    return _WORDS
-
-
-#: The system wordlist is Webster's, so it holds base forms only - "process"
-#: but not "processing", "improvement" but not "improvements". Reducing a
-#: token before the lookup is what makes it usable.
-_SUFFIXES = ("s", "es", "ed", "d", "ing", "ly", "er", "ers", "est", "ion", "ions")
-
-
-def _is_word(tok: str) -> bool:
-    words = _words()
-    if not words:
-        return False
-    if tok in words:
-        return True
-    for suf in _SUFFIXES:
-        if tok.endswith(suf) and len(tok) - len(suf) >= 3:
-            stem = tok[:-len(suf)]
-            if stem in words or (stem + "e") in words or stem[:-1] in words:
-                return True
-    # A compound of two words is still language: "workspace", "feedback".
-    return any(tok[:i] in words and tok[i:] in words
-               for i in range(3, len(tok) - 2))
-
-
-def _identifierish(tok: str) -> bool:
-    """Could this token name somebody or something, rather than be language?
-
-    Anything carrying structure - a digit, an @, a dot, a hyphen - is not a
-    word regardless of the dictionary. Everything else has to not be one.
-    """
-    if any(c in tok for c in "@._+-") or any(c.isdigit() for c in tok):
-        return True
-    if len(tok) < 4:
-        return False        # no structure and this short is language, not a name
-    return not _is_word(tok)
-
-
-def _learn(sid: str, lt: str, rt: str) -> None:
-    """Fold one pair's delta into what this run is known to rewrite.
-
-    No pattern list. The two panes are the same document before and after, so
-    a token on the left and gone on the right IS a value this pipeline treats
-    as PII -- whatever type it happens to be. A UAN, a badge number, a room
-    name: if the run rewrites it anywhere, it is in the vocabulary, and no
-    code had to learn what one looks like.
-    """
-    left, right = set(_vocab_split(lt)), set(_vocab_split(rt))
-    with _DERIVE_LOCK:
-        if sid in _DERIVED["seen"]:
+            lt = S["left_store"].read(row["left"]).decode("utf-8", "replace")
+            rt = S["right_store"].read(row["right"]).decode("utf-8", "replace")
+        except Exception:              # noqa: BLE001 - a warm-up miss is not fatal
             return
-        _DERIVED["seen"].add(sid)
-        _DERIVED["orig"] |= {v for v in left - right if len(v) >= 3}
-        _DERIVED["repl"] |= {v for v in right - left if len(v) >= 3}
-
-
-def warm_derived(S) -> None:
-    """Learn from the first pairs in the background, once.
-
-    Leaks are found by comparing this document against what the run did
-    elsewhere, so the vocabulary has to come from more than the document on
-    screen. Reading a bounded sample up front means document one already has
-    marks; every document the reviewer opens then adds to it.
-    """
-    with _DERIVE_LOCK:
-        if _DERIVED["warm"]:
-            return
-        _DERIVED["warm"] = True
+        _learn(user, sid, set(_vocab_split(lt)), set(_vocab_split(rt)))
 
     def run():
-        for i, row in enumerate(S["rows"]):
-            if len(_DERIVED["seen"]) >= DERIVE_WARM:
-                return
-            if not (row.get("left") and row.get("right")):
-                continue
-            try:
-                sid = str(i)
-                _learn(sid,
-                       _doc_text("left", sid, row["left"], S["left_store"]),
-                       _doc_text("right", sid, row["right"], S["right_store"]))
-            except Exception:      # noqa: BLE001 - a warm-up miss is not fatal
-                continue
+        rows = [(i, r) for i, r in enumerate(S["rows"])
+                if r.get("left") and r.get("right")
+                and (r.get("label") or "").split("/")[0] == user][:DERIVE_WARM]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(one, rows))
 
     threading.Thread(target=run, daemon=True).start()
 
 
-def _rank(values) -> list:
-    """Longest first, capped so the client regex stays runnable."""
-    return sorted({v for v in values if len(v) >= 3}, key=len, reverse=True)[:PII_MAX]
-
-
-def derive_pii(sid: str, lt: str, rt: str) -> dict:
+def derive_pii(user: str, sid: str, lt: str, rt: str) -> dict:
     """Highlights with no mapping database, from the run's own behaviour.
 
-    Three questions, none of which needs to know what PII looks like:
+      left-only    a value the run rewrote in this document
+      right-only   the surrogate it wrote in
+      both panes, and rewritten often elsewhere -> a leak
 
-      left-only   this document, a value the run rewrote here
-      right-only  this document, the surrogate it wrote in
-      both panes AND rewritten somewhere else in this run -> a leak
+    The third is the one worth having: it catches inconsistent redaction, an
+    org name substituted in one file and left verbatim in the next, which no
+    pattern can see because the value reads as ordinary text.
 
-    The third is the one worth having. It catches inconsistent redaction --
-    an org name substituted in one file and left verbatim in the next -- which
-    is the defect a pattern matcher cannot see, because the value looks like
-    ordinary text. It costs no per-type code and improves as the reviewer
-    moves through the run.
-
-    Weaker than a mapping table: it marks tokens rather than whole values, and
-    a value the run never rewrote anywhere is invisible to it. It is what
-    there is when no pii_mappings.db shipped, and no marks is worse.
+    Weaker than a mapping table and honest about it: marks are tokens rather
+    than whole values, and a token the run never rewrote anywhere is invisible
+    to it.
     """
-    lt, rt = lt or "", rt or ""
-    left, right = set(_vocab_split(lt)), set(_vocab_split(rt))
-    if lt and rt:
-        _learn(sid, lt, rt)
+    left = set(_vocab_split(lt or ""))
+    right = set(_vocab_split(rt or ""))
+    pair = bool(lt and rt)
+    if pair:
+        _learn(user, sid, left, right)
+    here = (left & right) if pair else (left or right)
+    st = _bucket(user)
     with _DERIVE_LOCK:
-        known = set(_DERIVED["orig"])
-    if not (lt and rt):
-        # One pane: no delta to take, so everything the run is known to
-        # rewrite becomes the thing to look for here.
-        here = left or right
-        return {"orig": [], "repl": [],
-                "leak": _rank(v for v in known & here if _identifierish(v)),
-                "derived": True, "learned": len(known)}
-    return {"orig": _rank(left - right),
-            "repl": _rank(right - left),
-            "leak": _rank(v for v in known & left & right if _identifierish(v)),
-            "derived": True, "learned": len(known)}
+        rewrote, kept = st["rewrote"], st["kept"]
+        leak = [t for t in here
+                if rewrote[t] >= DERIVE_MIN
+                and rewrote[t] >= DERIVE_RATE * (rewrote[t] + kept[t])]
+        learned = len(rewrote)
+    return {"orig": _rank(left - right) if pair else [],
+            "repl": _rank(right - left) if pair else [],
+            "leak": _rank(leak), "derived": True, "learned": learned}
 
 
 def map_key(row: dict) -> str:
@@ -1399,8 +1374,7 @@ kbd{font:11px ui-monospace,Menlo,monospace;background:var(--soft);border:1px sol
   <main>
     <section><h2><span class="hl" id="lh">Source</span><span class="hp" id="lhp"></span></h2>
       <div class="pane" id="lp"></div></section>
-    <section><h2 class="r"><span class="hl" id="rh">Output</span><span class="keep" id="rhk"
-      style="display:none"></span><span class="hp" id="rhp"></span></h2>
+    <section><h2 class="r"><span class="hl" id="rh">Output</span><span class="hp" id="rhp"></span></h2>
       <div class="pane" id="rp"></div></section>
   </main>
   <aside id="info"></aside>
@@ -1880,7 +1854,10 @@ function rxOf(list){
 async function loadPii(id){
   // Per document, not once at startup: the run-wide vocabulary is hundreds of
   // thousands of values and only the ones in this document can ever match.
-  PIIRX={orig:null,repl:null,leak:null}; PIIDERIVED=false;
+  resetPii();
+  if(!HILITE) return;        // mark() would throw the answer away
+  if(PIISID===id) return;    // same document, same marks
+  PIISID=id;
   try{
     const d=await (await fetch("/api/pii?sid="+encodeURIComponent(id))).json();
     PIIRX.orig=rxOf(d.orig); PIIRX.repl=rxOf(d.repl); PIIRX.leak=rxOf(d.leak);
@@ -1888,7 +1865,8 @@ async function loadPii(id){
   }catch(e){}
   hilLabel();
 }
-var PIIDERIVED=false;
+var PIIDERIVED=false, PIISID=null;
+function resetPii(){ PIIRX={orig:null,repl:null,leak:null}; PIIDERIVED=false; }
 function hilLabel(){
   // Derived marks come from diffing the panes, not from the run's own mapping
   // table. Say which, every time -- a reviewer treating a guess as authority
@@ -2132,23 +2110,14 @@ function head(){
   comments(p); counters();
   return true;
 }
-/* The folder a document sits in, above the document. It is the one part of
-   the deliverable that has to be redacted too and the one part neither pane
-   ever shows: gmail/anirudh.trivedi@inc42.com/messages/page_000001.jsonl
-   names a person and their employer in the object key whatever the bytes
-   underneath look like. Any name the output kept AND that reads as personal
-   goes in a chip ahead of the path, where the truncation cannot eat it. */
+/* The folder a document sits in, above the document -- neither pane ever
+   shows it, and gmail/<someone>@<employer>/messages/page_000001.jsonl names a
+   person in the object key whatever the bytes underneath look like. */
 function dirOf(k){const b=(k||"").split("/"); b.pop(); return b.join("/");}
 function paneHeads(p){
   el("lhp").textContent=dirOf(p.left); el("lhp").title=p.left||"";
   el("rhp").textContent=p.right?dirOf(p.right):"";
   el("rhp").title=p.right||"";
-  const keep=p.kept||[];
-  const chip=el("rhk");
-  chip.style.display=keep.length?"":"none";
-  chip.textContent=keep.length?"kept "+keep.join(", "):"";
-  chip.title=keep.length?
-    "The output left this folder name unchanged and it reads as personal data.":"";
 }
 function render(){
   if(!head()){ el("lp").innerHTML=el("rp").innerHTML=
@@ -2354,7 +2323,7 @@ addEventListener("keydown",e=>{
   else if(kl==="i"){e.preventDefault();toggleInfo();}
   else if(kl==="m"){e.preventDefault();maps();}
   else if(kl==="h"){e.preventDefault();HILITE=!HILITE;
-    hilLabel(); render();}
+    PIISID=null; hilLabel(); render();}
   else if(kl==="y"){e.preventDefault();SYNC=!SYNC;el("syn").textContent=SYNC?"sync on":"sync off";}
   else if(kl==="a"){e.preventDefault();onlyNew=!onlyNew;
     el("mode").textContent=onlyNew?"unreviewed only":"all files";build();list();render();}
@@ -2653,6 +2622,7 @@ def open_review(root=None, left=None, right=None, profile=None,
         if inner:
             map_spec, map_store, map_inner = f"{rs}/{inner}", rs, inner
 
+    reset_derived()          # a new review is a new run; nothing carries over
     with _LOCK:
         S.update(ready=True, rows=every, sample=rows,
                  left_store=ls, right_store=rs,
@@ -2858,9 +2828,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # tool, so it degrades rather than switching off.
                 spec = resolve_map(src, S.get("profile"), user) if src else None
                 if not spec:
-                    warm_derived(S)
-                    return self._json(dict(derive_pii(sid, lt, rt), user=user,
-                                           no_mappings=bool(src)))
+                    warm_derived(user)
+                    return self._json(derive_pii(user, sid, lt, rt))
                 inner = S.get("map_inner") if spec == src else None
                 store = S.get("map_store") if spec == src else None
                 idx = pii_index(spec, S.get("profile"), store, inner)
