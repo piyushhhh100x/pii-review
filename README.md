@@ -3,6 +3,18 @@
 Source on the left, what the pipeline produced on the right. Eyeball a hundred
 documents in a sitting without touching the mouse.
 
+## Set it up
+
+On a machine that has never run this, hand a coding agent — Claude Code,
+Codex, whichever — the setup skill and let it do the whole pass:
+
+```
+use the skill at .claude/skills/setup-redaction-reviewer/SKILL.md
+```
+
+It checks the interpreter, starts the app, and wires up the PDF and S3 extras
+only if the run needs them.
+
 ## Run it
 
 ```
