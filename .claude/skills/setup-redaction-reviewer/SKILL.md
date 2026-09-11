@@ -6,9 +6,9 @@ description: Set up and launch the redaction reviewer on any machine (macOS, Lin
 # Set up the redaction reviewer
 
 A checklist for an agent working on a machine that has never run this tool.
-Nothing here installs anything the app needs to start — the app is standard
-library only. Steps 4 and 5 are extras, and are only worth doing if the run
-being reviewed actually needs them.
+The app starts on the standard library alone, but it does not display
+anything without PyMuPDF — step 4, which is not optional however much its
+name suggests it. Step 5 is a genuine extra, for S3 runs only.
 
 Work through it top to bottom. Report at the end which steps applied and
 which were skipped, and paste the URL the app printed.
@@ -65,9 +65,17 @@ Options worth knowing: `--pair SOURCE OUTPUT` when the two halves are
 siblings rather than nested, `--profile` for S3, `--mappings` to point at a
 `pii_mappings.db`, `--seed` to review someone else's sample.
 
-## 4. Optional — PDFs that scroll in step
+## 4. PyMuPDF — required, despite the name
 
-Skip unless the run contains PDFs.
+Do not skip this, whatever the run contains.
+
+PyMuPDF reads PDFs, so it looks like it should only matter for a run that has
+them. It does not work out that way here. The browser sets its whole
+document-fetching flag from whether the server found PyMuPDF, so on a machine
+without it **no document of any type loads** — `.eml`, `.json`, `.csv` and the
+rest all sit there saying "could not ask the server about this document"
+while the app itself looks fine. Installing PyMuPDF is what turns fetching
+back on.
 
 The app shells out to any interpreter on the box that can `import fitz`; it
 does not have to be the one running the app, and it remembers the one it
@@ -78,8 +86,11 @@ python3 -m pip install --user PyMuPDF
 python3 -c "import fitz; print(fitz.__doc__)"     # must succeed
 ```
 
-Without it PDFs still open — they fall back to the browser's own viewer, and
-the two panes just do not scroll together.
+Confirm the panes actually fill with a document before calling the setup
+done. That check is the point of this step — a clean start proves nothing.
+
+Once installed it also does the job it is named for: the two panes scroll in
+step through a PDF instead of falling back to the browser's own viewer.
 
 ## 5. Optional — S3 access
 
@@ -131,6 +142,9 @@ Tell the user about these; none are checked in.
 - **PII-mappings panel asks for a database** — the run shipped no
   `_pii/pii_mappings.db`. Point at one with `--mappings`, or leave it; the
   app falls back to diffing the pair.
+- **Both panes say "could not ask the server about this document", and no
+  file of any type opens** — PyMuPDF is missing. This is step 4, and it is
+  not the PDF-only problem it sounds like; see that step.
 - **Test suite** — `python3 -m unittest test_review -q`. On Windows a couple
   of tests fail on `\` vs `/` in path assertions; that is the suite, not the
   install.
